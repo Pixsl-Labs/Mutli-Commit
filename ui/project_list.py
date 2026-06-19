@@ -1,16 +1,17 @@
-"""Left panel — recent projects list with open buttons."""
+"""Left panel — grouped project list with one-click actions and advanced context menu."""
 import os
 import subprocess
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Pango, GdkPixbuf
-from core import project_manager, settings
+from gi.repository import Gtk, Pango, Gdk
+from core import project_groups, settings
 from core.git_ops import is_git_repo, get_status, get_current_branch
 from ui.checklist_window import ChecklistWindow
 
 STATUS_CLEAN    = "🟢"
 STATUS_UNSTAGED = "🟡"
 STATUS_CONFLICT = "🔴"
+
 
 def _get_status_icon(path):
     if not is_git_repo(path):
@@ -21,6 +22,7 @@ def _get_status_icon(path):
     if "U" in s or "AA" in s or "DD" in s:
         return STATUS_CONFLICT
     return STATUS_UNSTAGED
+
 
 class ProjectListPanel(Gtk.Box):
     def __init__(self, on_select, on_code_review=None):
@@ -57,16 +59,20 @@ class ProjectListPanel(Gtk.Box):
             border-bottom: 1px solid alpha(white, 0.1);
             padding: 8px;
         }
+        .group-row {
+            background: alpha(white, 0.035);
+            border-bottom: 1px solid alpha(white, 0.09);
+        }
+        .group-title { font-weight: bold; font-size: 12px; }
+        .pinned-row { background: alpha(#f1c40f, 0.06); }
         """
         provider = Gtk.CssProvider()
         provider.load_from_data(css)
         Gtk.StyleContext.add_provider_for_screen(
-            __import__("gi.repository", fromlist=["Gdk"]).Gdk.Screen.get_default(),
-            provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
     def _build(self):
-        # Header
         hdr = Gtk.Box(spacing=6)
         hdr.get_style_context().add_class("panel-header")
         lbl = Gtk.Label()
@@ -74,22 +80,28 @@ class ProjectListPanel(Gtk.Box):
         lbl.set_halign(Gtk.Align.START)
         hdr.pack_start(lbl, True, True, 0)
 
+        add_group_btn = Gtk.Button(label="+ Group")
+        add_group_btn.set_tooltip_text("Create a collapsible project group")
+        add_group_btn.set_relief(Gtk.ReliefStyle.NONE)
+        add_group_btn.connect("clicked", self._add_group_dialog)
+        hdr.pack_end(add_group_btn, False, False, 0)
+
+        add_btn = Gtk.Button(label="+ Project")
+        add_btn.set_tooltip_text("Add a project folder to Multi-Commit")
+        add_btn.connect("clicked", lambda _: self.open_folder_dialog())
+        hdr.pack_end(add_btn, False, False, 0)
+
         refresh_btn = Gtk.Button(label="↻")
-        refresh_btn.set_tooltip_text("Refresh statuses")
+        refresh_btn.set_tooltip_text("Refresh project Git status indicators")
         refresh_btn.set_relief(Gtk.ReliefStyle.NONE)
         refresh_btn.connect("clicked", lambda _: self.refresh())
         hdr.pack_end(refresh_btn, False, False, 0)
-
-        add_btn = Gtk.Button(label="+ Open")
-        add_btn.connect("clicked", lambda _: self.open_folder_dialog())
-        hdr.pack_end(add_btn, False, False, 0)
         self.pack_start(hdr, False, False, 0)
 
-        # Scrollable list
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.list_box = Gtk.ListBox()
-        self.list_box.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
+        self.list_box.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.list_box.connect("key-press-event", self._on_key_press)
         self.list_box.connect("row-selected", self._on_row_selected)
         self.list_box.connect("button-press-event", self._on_button_press)
@@ -97,35 +109,86 @@ class ProjectListPanel(Gtk.Box):
         self.pack_start(scroll, True, True, 0)
 
     def refresh(self):
+        selected = self.selected_path
         for child in self.list_box.get_children():
             self.list_box.remove(child)
 
-        projects = project_manager.load_recent()
-        if not projects:
-            lbl = Gtk.Label(label="No projects yet.\nClick '+ Open' to add one.")
-            lbl.set_justify(Gtk.Justification.CENTER)
-            lbl.set_margin_top(20)
-            row = Gtk.ListBoxRow()
-            row.add(lbl)
-            row.set_selectable(False)
-            self.list_box.add(row)
+        data = project_groups.load()
+        pinned = [p for p in data.get("pinned_projects", []) if os.path.exists(p)]
+        if pinned:
+            self.list_box.add(self._make_group_row({"id": "__pinned__", "name": "⭐ Pinned", "collapsed": False}, is_pinned_header=True))
+            for path in pinned:
+                self.list_box.add(self._make_row(path, pinned_style=True))
+
+        groups = data.get("groups", [])
+        if not groups:
+            self._add_empty_row()
         else:
-            for path in projects:
-                self.list_box.add(self._make_row(path))
+            any_project = bool(pinned)
+            for group in groups:
+                self.list_box.add(self._make_group_row(group))
+                if not group.get("collapsed"):
+                    for path in group.get("projects", []):
+                        any_project = True
+                        self.list_box.add(self._make_row(path))
+            if not any_project:
+                self._add_empty_row()
+
         self.list_box.show_all()
 
-    def _make_row(self, path):
+        if selected:
+            for row in self.list_box.get_children():
+                if getattr(row, "path", None) == selected:
+                    self.list_box.select_row(row)
+                    break
+
+    def _add_empty_row(self):
+        lbl = Gtk.Label(label="No projects yet.\nClick '+ Project' to add one.")
+        lbl.set_justify(Gtk.Justification.CENTER)
+        lbl.set_margin_top(20)
+        row = Gtk.ListBoxRow()
+        row.add(lbl)
+        row.set_selectable(False)
+        self.list_box.add(row)
+
+    def _make_group_row(self, group, is_pinned_header=False):
+        row = Gtk.ListBoxRow()
+        row.group_id = group.get("id")
+        row.is_group = True
+        row.set_selectable(False)
+        row.get_style_context().add_class("group-row")
+
+        box = Gtk.Box(spacing=6)
+        box.set_border_width(7)
+        arrow = "▸" if group.get("collapsed") else "▾"
+        lbl = Gtk.Label(label=("" if is_pinned_header else arrow + " ") + group.get("name", "Projects"))
+        lbl.set_halign(Gtk.Align.START)
+        lbl.get_style_context().add_class("group-title")
+        box.pack_start(lbl, True, True, 0)
+
+        if not is_pinned_header:
+            count = len(group.get("projects", []))
+            count_lbl = Gtk.Label(label=str(count))
+            count_lbl.get_style_context().add_class("dim-label")
+            box.pack_end(count_lbl, False, False, 0)
+
+        row.add(box)
+        return row
+
+    def _make_row(self, path, pinned_style=False):
         row = Gtk.ListBoxRow()
         row.path = path
         row.get_style_context().add_class("project-row")
+        if pinned_style:
+            row.get_style_context().add_class("pinned-row")
 
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         vbox.set_border_width(8)
 
-        # Top line: status icon + name + git badge
         top = Gtk.Box(spacing=6)
         status_icon = _get_status_icon(path)
         status_lbl = Gtk.Label(label=status_icon)
+        status_lbl.set_tooltip_text("Git status: green clean, amber changed, red conflicts")
         top.pack_start(status_lbl, False, False, 0)
 
         name = Gtk.Label(label=os.path.basename(path))
@@ -135,36 +198,42 @@ class ProjectListPanel(Gtk.Box):
         name.get_style_context().add_class("project-name")
         top.pack_start(name, True, True, 0)
 
+        if project_groups.is_pinned(path):
+            pin_lbl = Gtk.Label(label="⭐")
+            pin_lbl.set_tooltip_text("Pinned project")
+            top.pack_end(pin_lbl, False, False, 0)
+
         if is_git_repo(path):
             badge = Gtk.Label(label=" git ")
             badge.get_style_context().add_class("git-badge")
+            badge.set_tooltip_text("This folder is a Git repository")
             top.pack_end(badge, False, False, 0)
 
             branch = get_current_branch(path)
             branch_lbl = Gtk.Label(label=f"  {branch}")
             branch_lbl.get_style_context().add_class("branch-label")
+            branch_lbl.set_tooltip_text("Current Git branch")
             top.pack_end(branch_lbl, False, False, 0)
 
         vbox.pack_start(top, False, False, 0)
 
-        # Path
         path_lbl = Gtk.Label(label=path)
         path_lbl.set_halign(Gtk.Align.START)
         path_lbl.set_ellipsize(Pango.EllipsizeMode.START)
         path_lbl.set_max_width_chars(32)
         path_lbl.get_style_context().add_class("project-path")
+        path_lbl.set_tooltip_text(path)
         vbox.pack_start(path_lbl, False, False, 0)
 
-        # Action buttons
         btn_box = Gtk.Box(spacing=4)
         btn_box.set_margin_top(4)
 
         for label, tip, cb in [
-            ("📁 Folder",   "Open in file manager", lambda _, p=path: self._open_folder(p)),
-            ("💻 VSCode",   "Open in VSCode",        lambda _, p=path: self._open_vscode(p)),
-            ("🖥 Terminal", "Open terminal here",    lambda _, p=path: self._open_terminal(p)),
-            ("📋 Review",   "Generate code review",  lambda _, p=path: self._code_review(p)),
-            ("✅ Checklist", "Open project checklist", lambda _, p=path: self._open_checklist(p)),
+            ("📁 Folder",   "Open this project folder in the file manager", lambda _, p=path: self._open_folder(p)),
+            ("💻 VSCode",   "Open this project in VSCode",                 lambda _, p=path: self._open_vscode(p)),
+            ("🖥 Terminal", "Open a terminal in this project folder",       lambda _, p=path: self._open_terminal(p)),
+            ("📋 Review",   "Generate a markdown code review for this project", lambda _, p=path: self._code_review(p)),
+            ("✅ Checklist", "Open this project's roadmap/checklist",       lambda _, p=path: self._open_checklist(p)),
         ]:
             btn = Gtk.Button(label=label)
             btn.set_tooltip_text(tip)
@@ -174,7 +243,7 @@ class ProjectListPanel(Gtk.Box):
             btn_box.pack_start(btn, False, False, 0)
 
         rm = Gtk.Button(label="✕")
-        rm.set_tooltip_text("Remove from list")
+        rm.set_tooltip_text("Remove this project from Multi-Commit only. Files are not deleted.")
         rm.set_relief(Gtk.ReliefStyle.NONE)
         rm.connect("clicked", lambda _, p=path: self._remove(p))
         btn_box.pack_end(rm, False, False, 0)
@@ -188,7 +257,7 @@ class ProjectListPanel(Gtk.Box):
             self.selected_path = row.path
             self.on_select(row.path)
 
-    def open_folder_dialog(self):
+    def open_folder_dialog(self, group_id=None):
         dlg = Gtk.FileChooserDialog(
             title="Select Project Folder",
             action=Gtk.FileChooserAction.SELECT_FOLDER,
@@ -198,9 +267,29 @@ class ProjectListPanel(Gtk.Box):
         dlg.set_current_folder(os.path.expanduser("~/Projects"))
         if dlg.run() == Gtk.ResponseType.OK:
             path = dlg.get_filename()
-            project_manager.add_recent(path)
+            project_groups.add_project(path, group_id=group_id)
             self.refresh()
             self.on_select(path)
+        dlg.destroy()
+
+    def _add_group_dialog(self, _):
+        dlg = Gtk.Dialog(title="Add Project Group", transient_for=self.get_toplevel(), flags=0)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        Gtk.STOCK_OK, Gtk.ResponseType.OK)
+        box = dlg.get_content_area()
+        box.set_border_width(12)
+        entry = Gtk.Entry()
+        entry.set_placeholder_text("e.g. Dissertation, Tools, LifeWise")
+        entry.set_activates_default(True)
+        box.pack_start(Gtk.Label(label="Group name:"), False, False, 0)
+        box.pack_start(entry, False, False, 0)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        dlg.show_all()
+        if dlg.run() == Gtk.ResponseType.OK:
+            name = entry.get_text().strip()
+            if name:
+                project_groups.add_group(name)
+                self.refresh()
         dlg.destroy()
 
     def _open_folder(self, path):
@@ -224,54 +313,153 @@ class ProjectListPanel(Gtk.Box):
             self.on_code_review(path)
 
     def _remove(self, path):
-        project_manager.remove_recent(path)
+        project_groups.remove_project(path)
         self.refresh()
-    
+
     def _open_checklist(self, path):
         win = ChecklistWindow(self.get_toplevel(), path)
         win.show_all()
 
     def _on_key_press(self, widget, event):
-        from gi.repository import Gdk
-
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
         shift = event.state & Gdk.ModifierType.SHIFT_MASK
-
         if ctrl and shift and event.keyval == Gdk.KEY_Delete:
-            self._bulk_remove_selected()
+            row = self.list_box.get_selected_row()
+            if row and hasattr(row, "path"):
+                self._remove(row.path)
             return True
-
         return False
-    
-    def _bulk_remove_selected(self):
-        rows = self.list_box.get_selected_rows()
-        paths = [row.path for row in rows if hasattr(row, "path")]
-
-        if not paths:
-            return
-
-        dlg = Gtk.MessageDialog(
-            transient_for=self.get_toplevel(),
-            flags=0,
-            message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.YES_NO,
-            text=f"Remove {len(paths)} selected project(s)?"
-        )
-        dlg.format_secondary_text("This only removes them from Multi-Commit. It does not delete files from disk.")
-
-        if dlg.run() == Gtk.ResponseType.YES:
-            for path in paths:
-                project_manager.remove_recent(path)
-            self.refresh()
-
-        dlg.destroy()
 
     def _on_button_press(self, widget, event):
-        from gi.repository import Gdk
-
-        ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
-
-        if event.button == 1 and not ctrl:
-            self.list_box.unselect_all()
-
+        row = self.list_box.get_row_at_y(int(event.y))
+        if event.button == 1 and row and hasattr(row, "group_id") and not getattr(row, "path", None):
+            if row.group_id != "__pinned__":
+                project_groups.toggle_group(row.group_id)
+                self.refresh()
+            return True
+        if event.button == 3 and row:
+            if hasattr(row, "path"):
+                self._project_context_menu(row.path, event)
+                return True
+            if hasattr(row, "group_id") and row.group_id != "__pinned__":
+                self._group_context_menu(row.group_id, event)
+                return True
         return False
+
+    def _project_context_menu(self, path, event):
+        menu = Gtk.Menu()
+
+        def add(label, cb):
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", cb)
+            menu.append(item)
+
+        add("📁 Open Folder", lambda _: self._open_folder(path))
+        add("💻 Open in VSCode", lambda _: self._open_vscode(path))
+        add("🖥 Open Terminal", lambda _: self._open_terminal(path))
+        add("✅ Open Checklist", lambda _: self._open_checklist(path))
+        add("📋 Generate Code Review", lambda _: self._code_review(path))
+        menu.append(Gtk.SeparatorMenuItem())
+        add("⭐ Unpin Project" if project_groups.is_pinned(path) else "⭐ Pin Project",
+            lambda _: self._toggle_pin(path))
+        add("✏ Update Project Path", lambda _: self._update_project_path(path))
+        add("⬆ Move Up", lambda _: self._move_project(path, -1))
+        add("⬇ Move Down", lambda _: self._move_project(path, 1))
+
+        groups_menu = Gtk.Menu()
+        groups_item = Gtk.MenuItem(label="➡ Move to Group")
+        groups_item.set_submenu(groups_menu)
+        for group in project_groups.groups():
+            gi = Gtk.MenuItem(label=group.get("name", "Projects"))
+            gi.connect("activate", lambda _, gid=group.get("id"): self._move_to_group(path, gid))
+            groups_menu.append(gi)
+        menu.append(groups_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+        add("✕ Remove from List", lambda _: self._remove(path))
+        menu.show_all()
+        menu.popup_at_pointer(event)
+
+    def _group_context_menu(self, group_id, event):
+        menu = Gtk.Menu()
+
+        def add(label, cb):
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", cb)
+            menu.append(item)
+
+        add("➕ Add Project to Group", lambda _: self.open_folder_dialog(group_id=group_id))
+        add("✏ Rename Group", lambda _: self._rename_group(group_id))
+        add("▾ Collapse / Expand", lambda _: (project_groups.toggle_group(group_id), self.refresh()))
+        add("🗑 Delete Group", lambda _: self._delete_group(group_id))
+        menu.show_all()
+        menu.popup_at_pointer(event)
+
+    def _toggle_pin(self, path):
+        if project_groups.is_pinned(path):
+            project_groups.unpin_project(path)
+        else:
+            project_groups.pin_project(path)
+        self.refresh()
+
+    def _move_project(self, path, direction):
+        project_groups.move_project(path, direction)
+        self.refresh()
+
+    def _move_to_group(self, path, group_id):
+        project_groups.move_project_to_group(path, group_id)
+        self.refresh()
+
+    def _update_project_path(self, old_path):
+        dlg = Gtk.FileChooserDialog(
+            title="Choose Updated Project Folder",
+            transient_for=self.get_toplevel(),
+            action=Gtk.FileChooserAction.SELECT_FOLDER,
+            buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                     Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
+        )
+        if os.path.exists(old_path):
+            dlg.set_current_folder(old_path)
+        else:
+            dlg.set_current_folder(os.path.expanduser("~/Projects"))
+        if dlg.run() == Gtk.ResponseType.OK:
+            new_path = dlg.get_filename()
+            project_groups.update_project_path(old_path, new_path)
+            self.selected_path = new_path
+            self.refresh()
+            self.on_select(new_path)
+        dlg.destroy()
+
+    def _rename_group(self, group_id):
+        group = project_groups.find_group(group_id)
+        if not group:
+            return
+        dlg = Gtk.Dialog(title="Rename Group", transient_for=self.get_toplevel(), flags=0)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                        Gtk.STOCK_OK, Gtk.ResponseType.OK)
+        box = dlg.get_content_area()
+        box.set_border_width(12)
+        entry = Gtk.Entry()
+        entry.set_text(group.get("name", "Projects"))
+        entry.set_activates_default(True)
+        box.pack_start(Gtk.Label(label="Group name:"), False, False, 0)
+        box.pack_start(entry, False, False, 0)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        dlg.show_all()
+        if dlg.run() == Gtk.ResponseType.OK:
+            project_groups.rename_group(group_id, entry.get_text())
+            self.refresh()
+        dlg.destroy()
+
+    def _delete_group(self, group_id):
+        dlg = Gtk.MessageDialog(
+            transient_for=self.get_toplevel(), flags=0,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text="Delete this group?"
+        )
+        dlg.format_secondary_text("Projects will be moved back into the default group. Files are not deleted.")
+        if dlg.run() == Gtk.ResponseType.YES:
+            project_groups.remove_group(group_id, move_projects_to_default=True)
+            self.refresh()
+        dlg.destroy()
