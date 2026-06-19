@@ -3,7 +3,7 @@ import os
 import subprocess
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GdkPixbuf
+from gi.repository import Gtk, GdkPixbuf, GLib
 from ui.project_list import ProjectListPanel
 from ui.commit_panel import CommitPanel
 from ui.project_dashboard import ProjectDashboard
@@ -12,6 +12,8 @@ from ui.command_manager import CommandManagerWindow
 from ui.appearance_dialog import AppearanceDialog, apply_theme, load_theme
 from ui.checklist_window import ChecklistWindow
 from core import favourites
+from ui.update_dialog import UpdatePromptWindow
+from core import update_manager
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "icon.png")
 
@@ -59,6 +61,8 @@ class MainWindow(Gtk.Window):
         self.statusbar.push(0, "Ready — select a project to begin")
         vbox.pack_end(self.statusbar, False, False, 0)
 
+        GLib.timeout_add(1200, self._startup_update_check)
+
     # ── Menubar ──────────────────────────────────────────────────────────────
 
     def _build_menubar(self):
@@ -97,6 +101,9 @@ class MainWindow(Gtk.Window):
         ]))
 
         menubar.append(self._menu("Help", [
+            ("Check for Updates",    self._manual_update_check),
+            ("Preview Update Popup", self._preview_update_popup),
+            None,
             ("Keyboard Shortcuts",   self._show_shortcuts),
             ("About Multi-Commit",   self._show_about),
         ]))
@@ -230,6 +237,37 @@ class MainWindow(Gtk.Window):
         )
         dlg.run()
         dlg.destroy()
+
+    def _startup_update_check(self):
+        info = update_manager.check_for_update()
+        if info.get("available"):
+            self._show_update_prompt(info)
+        return False
+
+    def _manual_update_check(self, _=None):
+        info = update_manager.check_for_update()
+        if info.get("available"):
+            self._show_update_prompt(info)
+            return
+
+        dlg = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text="Multi-Commit is up to date"
+        )
+        dlg.format_secondary_text(info.get("message", "No update available."))
+        dlg.run()
+        dlg.destroy()
+
+    def _preview_update_popup(self, _=None):
+        info = update_manager.check_for_update(force_preview=True)
+        self._show_update_prompt(info)
+
+    def _show_update_prompt(self, info):
+        popup = UpdatePromptWindow(self, info)
+        popup.present_top_right()
 
     def _show_about(self, _=None):
         dlg = Gtk.AboutDialog()
