@@ -6,6 +6,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GdkPixbuf
 from ui.project_list import ProjectListPanel
 from ui.commit_panel import CommitPanel
+from ui.project_dashboard import ProjectDashboard
 from ui.settings_dialog import SettingsDialog
 from ui.command_manager import CommandManagerWindow
 from ui.appearance_dialog import AppearanceDialog, apply_theme, load_theme
@@ -35,17 +36,24 @@ class MainWindow(Gtk.Window):
         self.add(vbox)
         vbox.pack_start(self._build_menubar(), False, False, 0)
 
-        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        paned.set_position(320)
-        vbox.pack_start(paned, True, True, 0)
+        outer_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        outer_paned.set_position(320)
+        vbox.pack_start(outer_paned, True, True, 0)
 
         self.commit_panel = CommitPanel()
+        self.project_dashboard = ProjectDashboard()
         self.project_list = ProjectListPanel(
             on_select=self._on_project_selected,
             on_code_review=self._run_code_review,
         )
-        paned.pack1(self.project_list, resize=False, shrink=False)
-        paned.pack2(self.commit_panel, resize=True,  shrink=False)
+
+        right_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        right_paned.set_position(300)
+        right_paned.pack1(self.project_dashboard, resize=False, shrink=False)
+        right_paned.pack2(self.commit_panel, resize=True, shrink=False)
+
+        outer_paned.pack1(self.project_list, resize=False, shrink=False)
+        outer_paned.pack2(right_paned, resize=True, shrink=False)
 
         self.statusbar = Gtk.Statusbar()
         self.statusbar.push(0, "Ready — select a project to begin")
@@ -164,6 +172,7 @@ class MainWindow(Gtk.Window):
 
     def _on_project_selected(self, path):
         self.commit_panel.set_project(path)
+        self.project_dashboard.set_project(path)
         self.statusbar.push(0, f"Project: {path}")
 
     def _open_command_manager(self, _=None):
