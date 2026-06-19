@@ -56,8 +56,8 @@ def new_stage(title: str, notes: str = "") -> dict:
     return {"title": title, "notes": notes, "items": []}
 
 
-def new_item(text: str, done: bool = False) -> dict:
-    return {"text": text, "done": done}
+def new_item(text: str, done: bool = False, description: str = "") -> dict:
+    return {"text": text, "done": done, "description": description}
 
 
 def progress_for_stage(stage: dict) -> tuple:
@@ -82,6 +82,8 @@ def progress_for_project(project_data: dict) -> tuple:
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _NUMBERED_RE = re.compile(r"^\s*\d+[.)]\s+(.*)$")
 _BULLET_RE = re.compile(r"^\s*[-*]\s+(.*)$")
+_CHECKBOX_RE = re.compile(r"^\[[ xX]\]\s+(.*)$")
+_DESCRIPT_RE = re.compile(r"^\s*Descript:\s*(.*)$", re.IGNORECASE)
 
 
 def parse_markdown_roadmap(text: str) -> list:
@@ -89,16 +91,17 @@ def parse_markdown_roadmap(text: str) -> list:
     Parse a markdown roadmap into a list of stage dicts.
 
     Rules:
-    - Lines starting with #, ##, ### etc. start a new stage (title = heading text).
-    - Numbered list items (1. Task) and bullet items (* Task / - Task) become
-      checklist items in the current stage.
-    - Any other non-empty, non-list paragraph text is appended to the
-      current stage's "notes".
-    - If list items or text appear before any heading, they go into a
-      default "General" stage.
+    - Lines starting with #, ##, ### etc. start a new stage.
+    - Numbered and bullet items become checklist items.
+    - Optional `Descript:` lines directly after an item become that item's description.
+    - Extra indented/plain lines after `Descript:` continue the description until the next item/heading.
+    - Other non-empty plain text becomes stage notes.
+    - Checkbox syntax [ ]/[x] is tolerated but stripped.
     """
     stages = []
     current = None
+    last_item = None
+    in_description = False
 
     def ensure_current():
         nonlocal current
@@ -107,37 +110,56 @@ def parse_markdown_roadmap(text: str) -> list:
             stages.append(current)
         return current
 
+    def clean_item_text(raw: str) -> str:
+        raw = raw.strip()
+        checkbox = _CHECKBOX_RE.match(raw)
+        if checkbox:
+            return checkbox.group(1).strip()
+        return raw
+
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
 
         if not line.strip():
+            in_description = False
             continue
 
         heading_match = _HEADING_RE.match(line)
         if heading_match:
             title = heading_match.group(2).strip()
-            if not title:
-                continue
-            current = new_stage(title)
-            stages.append(current)
+            if title:
+                current = new_stage(title)
+                stages.append(current)
+                last_item = None
+                in_description = False
+            continue
+
+        descript_match = _DESCRIPT_RE.match(line)
+        if descript_match and last_item is not None:
+            desc = descript_match.group(1).strip()
+            if desc:
+                existing = last_item.get("description", "").strip()
+                last_item["description"] = (existing + "\n" + desc).strip() if existing else desc
+            in_description = True
             continue
 
         numbered_match = _NUMBERED_RE.match(line)
         bullet_match = _BULLET_RE.match(line)
 
-        if numbered_match:
-            item_text = numbered_match.group(1).strip()
+        if numbered_match or bullet_match:
+            item_text = clean_item_text((numbered_match or bullet_match).group(1))
             if item_text:
-                ensure_current()["items"].append(new_item(item_text))
+                last_item = new_item(item_text)
+                ensure_current()["items"].append(last_item)
+                in_description = False
             continue
 
-        if bullet_match:
-            item_text = bullet_match.group(1).strip()
-            if item_text:
-                ensure_current()["items"].append(new_item(item_text))
+        # Continuation line for a Descript block.
+        if in_description and last_item is not None:
+            existing = last_item.get("description", "").strip()
+            last_item["description"] = (existing + "\n" + line.strip()).strip() if existing else line.strip()
             continue
 
-        # Plain paragraph text — append to current stage's notes
         stage = ensure_current()
         if stage["notes"]:
             stage["notes"] += "\n" + line.strip()
@@ -145,7 +167,6 @@ def parse_markdown_roadmap(text: str) -> list:
             stage["notes"] = line.strip()
 
     return stages
-
 
 def merge_imported_stages(project_data: dict, imported_stages: list, replace: bool = False) -> dict:
     """
@@ -183,6 +204,12 @@ def export_markdown(project_path: str, project_name: str = None) -> str:
         for item in stage.get("items", []):
             box = "[x]" if item.get("done") else "[ ]"
             lines.append(f"- {box} {item.get('text', '')}")
+            desc = item.get("description", "").strip()
+            if desc:
+                desc_lines = desc.splitlines()
+                lines.append(f"  Descript: {desc_lines[0]}")
+                for extra in desc_lines[1:]:
+                    lines.append(f"  {extra}")
 
         notes = stage.get("notes", "").strip()
         if notes:

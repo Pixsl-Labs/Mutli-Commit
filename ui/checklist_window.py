@@ -57,6 +57,14 @@ class ChecklistWindow(Gtk.Window):
             font-family: sans-serif; font-size: 12px;
             background: alpha(#3498db, 0.05);
         }
+        .item-description {
+            font-size: 11px;
+            opacity: 0.72;
+            background: alpha(#3498db, 0.06);
+            border-left: 2px solid alpha(#3498db, 0.35);
+            padding: 6px;
+            margin-left: 26px;
+        }
         .save-btn-saved {
             background: #27ae60; color: white;
             border-radius: 4px;
@@ -161,6 +169,7 @@ class ChecklistWindow(Gtk.Window):
         self.stage_list.connect("row-selected", self._on_stage_selected)
         self.stage_list.connect("button-press-event", self._on_stage_list_button_press)
         self.stage_list.connect("button-press-event", self._on_stage_click_clear_selection)
+        self.items_list.connect("button-press-event", self._on_item_click_clear_selection)
         stage_scroll.add(self.stage_list)
         left.pack_start(stage_scroll, True, True, 0)
 
@@ -197,7 +206,6 @@ class ChecklistWindow(Gtk.Window):
         self.items_list.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
         self.items_list.connect("key-press-event", self._on_key_press)
         self.items_list.connect("button-press-event", self._on_items_list_button_press)
-        self.items_list.connect("button-press-event", self._on_item_click_clear_selection)
         items_scroll.add(self.items_list)
         right.pack_start(items_scroll, True, True, 0)
 
@@ -377,13 +385,24 @@ class ChecklistWindow(Gtk.Window):
         row.item_index = index
         row.get_style_context().add_class("item-row")
 
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        outer.set_border_width(6)
+
         hbox = Gtk.Box(spacing=8)
-        hbox.set_border_width(6)
 
         check = Gtk.CheckButton()
         check.set_active(bool(item.get("done")))
         check.connect("toggled", self._on_item_toggled, index)
         hbox.pack_start(check, False, False, 0)
+
+        desc = item.get("description", "").strip()
+        arrow = None
+        revealer = None
+        if desc:
+            arrow = Gtk.ToggleButton(label="▸")
+            arrow.set_relief(Gtk.ReliefStyle.NONE)
+            arrow.set_tooltip_text("Show/hide task description")
+            hbox.pack_start(arrow, False, False, 0)
 
         lbl = Gtk.Label(label=item.get("text", ""))
         lbl.set_halign(Gtk.Align.START)
@@ -392,10 +411,28 @@ class ChecklistWindow(Gtk.Window):
         if item.get("done"):
             lbl.get_style_context().add_class("item-text-done")
         hbox.pack_start(lbl, True, True, 0)
+        outer.pack_start(hbox, False, False, 0)
 
-        row.add(hbox)
+        if desc:
+            revealer = Gtk.Revealer()
+            revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+            desc_lbl = Gtk.Label(label=desc)
+            desc_lbl.set_halign(Gtk.Align.START)
+            desc_lbl.set_xalign(0.0)
+            desc_lbl.set_line_wrap(True)
+            desc_lbl.get_style_context().add_class("item-description")
+            revealer.add(desc_lbl)
+            outer.pack_start(revealer, False, False, 0)
+
+            def toggle_desc(btn):
+                active = btn.get_active()
+                btn.set_label("▾" if active else "▸")
+                revealer.set_reveal_child(active)
+
+            arrow.connect("toggled", toggle_desc)
+
+        row.add(outer)
         return row
-
     def _on_item_toggled(self, check, index):
         stage = self._current_stage()
         if stage is None:
@@ -610,6 +647,7 @@ class ChecklistWindow(Gtk.Window):
         dlg = Gtk.Dialog(title="Edit Item", transient_for=self, flags=0)
         dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
                         Gtk.STOCK_OK, Gtk.ResponseType.OK)
+        dlg.set_default_size(520, 320)
         box = dlg.get_content_area()
         box.set_border_width(12)
         box.set_spacing(8)
@@ -623,17 +661,32 @@ class ChecklistWindow(Gtk.Window):
         entry.set_activates_default(True)
         box.pack_start(entry, False, False, 0)
 
+        desc_lbl = Gtk.Label(label="Description (optional):")
+        desc_lbl.set_halign(Gtk.Align.START)
+        box.pack_start(desc_lbl, False, False, 0)
+
+        desc_scroll = Gtk.ScrolledWindow()
+        desc_scroll.set_min_content_height(120)
+        desc_view = Gtk.TextView()
+        desc_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        desc_buf = desc_view.get_buffer()
+        desc_buf.set_text(items[index].get("description", ""))
+        desc_scroll.add(desc_view)
+        box.pack_start(desc_scroll, True, True, 0)
+
         dlg.set_default_response(Gtk.ResponseType.OK)
         dlg.show_all()
 
         if dlg.run() == Gtk.ResponseType.OK:
             new_text = entry.get_text().strip()
+            start, end = desc_buf.get_bounds()
+            new_desc = desc_buf.get_text(start, end, False).strip()
             if new_text:
                 items[index]["text"] = new_text
+                items[index]["description"] = new_desc
                 self._refresh_items_list()
                 self._mark_dirty()
         dlg.destroy()
-
     def _toggle_item_done(self, index):
         stage = self._current_stage()
         if stage is None:
@@ -691,7 +744,11 @@ class ChecklistWindow(Gtk.Window):
 
         from gi.repository import Gdk
         clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        clipboard.set_text(items[index].get("text", ""), -1)
+        text = items[index].get("text", "")
+        desc = items[index].get("description", "").strip()
+        if desc:
+            text += "\nDescript: " + desc
+        clipboard.set_text(text, -1)
 
     def _duplicate_item(self, index):
         stage = self._current_stage()
@@ -814,6 +871,7 @@ class ChecklistWindow(Gtk.Window):
         dlg = Gtk.Dialog(title="Add Item", transient_for=self, flags=0)
         dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
                         Gtk.STOCK_OK, Gtk.ResponseType.OK)
+        dlg.set_default_size(520, 300)
         box = dlg.get_content_area()
         box.set_border_width(12)
         box.set_spacing(8)
@@ -826,20 +884,33 @@ class ChecklistWindow(Gtk.Window):
         entry.set_activates_default(True)
         box.pack_start(entry, False, False, 0)
 
+        desc_lbl = Gtk.Label(label="Description (optional):")
+        desc_lbl.set_halign(Gtk.Align.START)
+        box.pack_start(desc_lbl, False, False, 0)
+
+        desc_scroll = Gtk.ScrolledWindow()
+        desc_scroll.set_min_content_height(100)
+        desc_view = Gtk.TextView()
+        desc_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        desc_buf = desc_view.get_buffer()
+        desc_scroll.add(desc_view)
+        box.pack_start(desc_scroll, True, True, 0)
+
         dlg.set_default_response(Gtk.ResponseType.OK)
         dlg.show_all()
 
         if dlg.run() == Gtk.ResponseType.OK:
             text = entry.get_text().strip()
+            start, end = desc_buf.get_bounds()
+            description = desc_buf.get_text(start, end, False).strip()
             if text:
-                stage.setdefault("items", []).append(checklists.new_item(text))
+                stage.setdefault("items", []).append(checklists.new_item(text, description=description))
                 self._refresh_items_list()
                 self._refresh_stage_header()
                 self._refresh_stage_list_progress_only()
                 self._update_overall_progress()
                 self._mark_dirty()
         dlg.destroy()
-
     def _remove_item(self, _):
         stage = self._current_stage()
         if stage is None:
@@ -1113,43 +1184,42 @@ class ChecklistWindow(Gtk.Window):
             return True
 
         return False
+    
+def _bulk_remove_selected_items(self):
+    stage = self._current_stage()
+    if stage is None:
+        return
 
-    def _bulk_remove_selected_items(self):
-        stage = self._current_stage()
-        if stage is None:
-            return
+    rows = self.items_list.get_selected_rows()
+    indexes = sorted(
+        [row.item_index for row in rows if hasattr(row, "item_index")],
+        reverse=True
+    )
 
-        rows = self.items_list.get_selected_rows()
-        indexes = sorted(
-            [row.item_index for row in rows if hasattr(row, "item_index")],
-            reverse=True
-        )
+    if not indexes:
+        return
 
-        if not indexes:
-            return
+    dlg = Gtk.MessageDialog(
+        transient_for=self,
+        flags=0,
+        message_type=Gtk.MessageType.WARNING,
+        buttons=Gtk.ButtonsType.YES_NO,
+        text=f"Delete {len(indexes)} selected checklist item(s)?"
+    )
 
-        dlg = Gtk.MessageDialog(
-            transient_for=self,
-            flags=0,
-            message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.YES_NO,
-            text=f"Delete {len(indexes)} selected checklist item(s)?"
-        )
+    if dlg.run() == Gtk.ResponseType.YES:
+        items = stage.get("items", [])
+        for index in indexes:
+            if 0 <= index < len(items):
+                items.pop(index)
 
-        response = dlg.run()
-        dlg.destroy()
+        self._refresh_items_list()
+        self._refresh_stage_header()
+        self._refresh_stage_list_progress_only()
+        self._update_overall_progress()
+        self._mark_dirty()
 
-        if response == Gtk.ResponseType.YES:
-            items = stage.get("items", [])
-            for index in indexes:
-                if 0 <= index < len(items):
-                    items.pop(index)
-
-            self._refresh_items_list()
-            self._refresh_stage_header()
-            self._refresh_stage_list_progress_only()
-            self._update_overall_progress()
-            self._mark_dirty()
+    dlg.destroy()
 
     def _bulk_remove_selected_stages(self):
         rows = self.stage_list.get_selected_rows()
@@ -1170,10 +1240,7 @@ class ChecklistWindow(Gtk.Window):
         )
         dlg.format_secondary_text("This also deletes all checklist items inside those stages.")
 
-        response = dlg.run()
-        dlg.destroy()
-
-        if response == Gtk.ResponseType.YES:
+        if dlg.run() == Gtk.ResponseType.YES:
             stages = self.project_data.get("stages", [])
             for index in indexes:
                 if 0 <= index < len(stages):
@@ -1183,6 +1250,21 @@ class ChecklistWindow(Gtk.Window):
             self._refresh_stage_list(keep_selection=False)
             self._mark_dirty()
 
+        dlg.destroy()
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
+
+    def _show_info(self, message, title="Info"):
+        dlg = Gtk.MessageDialog(
+            transient_for=self, flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text=title
+        )
+        dlg.format_secondary_text(message)
+        dlg.run()
+        dlg.destroy()
+
     def _on_stage_click_clear_selection(self, widget, event):
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
 
@@ -1190,6 +1272,7 @@ class ChecklistWindow(Gtk.Window):
             self.stage_list.unselect_all()
 
         return False
+
 
     def _on_item_click_clear_selection(self, widget, event):
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
