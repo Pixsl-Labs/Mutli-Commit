@@ -166,7 +166,6 @@ class ChecklistWindow(Gtk.Window):
         self.stage_list = Gtk.ListBox()
         self.stage_list.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
         self.stage_list.connect("key-press-event", self._on_key_press)
-        self.stage_list.connect("row-selected", self._on_stage_selected)
         self.stage_list.connect("button-press-event", self._on_stage_list_button_press)
         self.stage_list.connect("button-press-event", self._on_stage_click_clear_selection)
         self.items_list.connect("button-press-event", self._on_item_click_clear_selection)

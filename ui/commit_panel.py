@@ -65,6 +65,34 @@ class CommitPanel(Gtk.Box):
             font-size: 10px; padding: 2px 6px;
             border-radius: 3px; border: 1px solid alpha(white,0.15);
         }
+                .commit-validator-neutral {
+            background: alpha(#ffffff, 0.04);
+            color: alpha(#ffffff, 0.65);
+            border-left: 2px solid alpha(#ffffff, 0.18);
+            padding: 4px 6px;
+            border-radius: 4px;
+        }
+        .commit-validator-good {
+            background: alpha(#2ecc71, 0.10);
+            color: #c9f7d8;
+            border-left: 2px solid alpha(#2ecc71, 0.45);
+            padding: 4px 6px;
+            border-radius: 4px;
+        }
+        .commit-validator-warn {
+            background: alpha(#f1c40f, 0.10);
+            color: #fff0b8;
+            border-left: 2px solid alpha(#f1c40f, 0.45);
+            padding: 4px 6px;
+            border-radius: 4px;
+        }
+        .commit-validator-bad {
+            background: alpha(#e74c3c, 0.10);
+            color: #ffd0cc;
+            border-left: 2px solid alpha(#e74c3c, 0.45);
+            padding: 4px 6px;
+            border-radius: 4px;
+        }
         """
         provider = Gtk.CssProvider()
         provider.load_from_data(css)
@@ -461,13 +489,16 @@ class CommitPanel(Gtk.Box):
             self.status_label.set_text(f"⎇  {branch}   |   {changed} changed file(s)")
 
     def _known_commit_prefixes(self):
-        prefixes = []
-        for tmpl in self._get_commit_templates():
-            prefix = tmpl.get("prefix", "").strip()
-            if prefix.endswith(":"):
-                prefixes.append(prefix + " ")
-            elif prefix:
+        prefixes = [prefix for _name, prefix in COMMIT_TEMPLATES]
+
+        custom = settings.get("custom_commit_templates") or []
+        for item in custom:
+            prefix = item.get("prefix", "").strip()
+            if prefix:
+                if not prefix.endswith(" "):
+                    prefix += " "
                 prefixes.append(prefix)
+
         return prefixes
 
     def _set_commit_validator_state(self, css_class, text):
