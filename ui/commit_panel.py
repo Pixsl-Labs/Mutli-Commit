@@ -13,77 +13,17 @@ from ui.stash_panel import StashPanel
 from ui.pull_panel import PullPanel
 from ui.tag_panel import TagPanel
 
-DEFAULT_COMMIT_TEMPLATES = [
-    {
-        "name": "feat",
-        "prefix": "feat: ",
-        "description": "A new feature or visible user-facing functionality.",
-        "example": "feat: add checklist export button",
-        "style": "template-feat",
-    },
-    {
-        "name": "fix",
-        "prefix": "fix: ",
-        "description": "A bug fix.",
-        "example": "fix: persist checklist data after closing window",
-        "style": "template-fix",
-    },
-    {
-        "name": "docs",
-        "prefix": "docs: ",
-        "description": "Documentation-only changes.",
-        "example": "docs: update README with install steps",
-        "style": "template-docs",
-    },
-    {
-        "name": "style",
-        "prefix": "style: ",
-        "description": "Formatting, spacing, or visual code style changes without logic changes.",
-        "example": "style: align command manager buttons",
-        "style": "template-style",
-    },
-    {
-        "name": "refactor",
-        "prefix": "refactor: ",
-        "description": "Code restructuring that does not add features or fix bugs directly.",
-        "example": "refactor: split checklist storage helpers",
-        "style": "template-refactor",
-    },
-    {
-        "name": "test",
-        "prefix": "test: ",
-        "description": "Adding or updating tests.",
-        "example": "test: add checklist parser tests",
-        "style": "template-test",
-    },
-    {
-        "name": "chore",
-        "prefix": "chore: ",
-        "description": "Maintenance tasks, config changes, cleanup, or dependency updates.",
-        "example": "chore: update gitignore rules",
-        "style": "template-chore",
-    },
-    {
-        "name": "perf",
-        "prefix": "perf: ",
-        "description": "Performance improvements.",
-        "example": "perf: speed up project status refresh",
-        "style": "template-perf",
-    },
-    {
-        "name": "ci",
-        "prefix": "ci: ",
-        "description": "CI/CD, GitHub Actions, build pipeline, or automation changes.",
-        "example": "ci: add pytest workflow",
-        "style": "template-ci",
-    },
-    {
-        "name": "revert",
-        "prefix": "revert: ",
-        "description": "Reverts a previous commit.",
-        "example": "revert: revert terminal preload change",
-        "style": "template-revert",
-    },
+COMMIT_TEMPLATES = [
+    ("feat",     "feat: "),
+    ("fix",      "fix: "),
+    ("docs",     "docs: "),
+    ("style",    "style: "),
+    ("refactor", "refactor: "),
+    ("test",     "test: "),
+    ("chore",    "chore: "),
+    ("perf",     "perf: "),
+    ("ci",       "ci: "),
+    ("revert",   "revert: "),
 ]
 
 class CommitPanel(Gtk.Box):
@@ -124,61 +64,6 @@ class CommitPanel(Gtk.Box):
         .template-btn {
             font-size: 10px; padding: 2px 6px;
             border-radius: 3px; border: 1px solid alpha(white,0.15);
-        }
-                .template-feat {
-            background: alpha(#2ecc71, 0.22);
-            color: #dfffe9;
-            border: 1px solid alpha(#2ecc71, 0.45);
-        }
-        .template-fix {
-            background: alpha(#e74c3c, 0.22);
-            color: #ffe1df;
-            border: 1px solid alpha(#e74c3c, 0.45);
-        }
-        .template-docs {
-            background: alpha(#3498db, 0.22);
-            color: #d6ecff;
-            border: 1px solid alpha(#3498db, 0.45);
-        }
-        .template-style {
-            background: alpha(#95a5a6, 0.20);
-            color: #eef2f3;
-            border: 1px solid alpha(#95a5a6, 0.40);
-        }
-        .template-refactor {
-            background: alpha(#9b59b6, 0.22);
-            color: #f2ddff;
-            border: 1px solid alpha(#9b59b6, 0.45);
-        }
-        .template-test {
-            background: alpha(#f1c40f, 0.22);
-            color: #fff8d6;
-            border: 1px solid alpha(#f1c40f, 0.45);
-        }
-        .template-chore {
-            background: alpha(#7f8c8d, 0.22);
-            color: #eef2f3;
-            border: 1px solid alpha(#7f8c8d, 0.45);
-        }
-        .template-perf {
-            background: alpha(#1abc9c, 0.22);
-            color: #d8fff8;
-            border: 1px solid alpha(#1abc9c, 0.45);
-        }
-        .template-ci {
-            background: alpha(#e67e22, 0.22);
-            color: #fff0df;
-            border: 1px solid alpha(#e67e22, 0.45);
-        }
-        .template-revert {
-            background: alpha(#c0392b, 0.22);
-            color: #ffe1df;
-            border: 1px solid alpha(#c0392b, 0.45);
-        }
-        .template-custom {
-            background: alpha(#ffffff, 0.10);
-            color: white;
-            border: 1px dashed alpha(#ffffff, 0.35);
         }
         """
         provider = Gtk.CssProvider()
@@ -433,24 +318,13 @@ class CommitPanel(Gtk.Box):
         tmpl_lbl.get_style_context().add_class("dim-label")
         tmpl_box.pack_start(tmpl_lbl, False, False, 0)
 
-        self.template_buttons_box = Gtk.Box(spacing=4)
-        tmpl_box.pack_start(self.template_buttons_box, False, False, 0)
-
-        info_btn = Gtk.Button(label="ℹ Types")
-        info_btn.set_relief(Gtk.ReliefStyle.NONE)
-        info_btn.set_tooltip_text("Show what feat, fix, docs, chore etc. mean")
-        info_btn.connect("clicked", self._show_template_help)
-        tmpl_box.pack_start(info_btn, False, False, 0)
-
-        custom_btn = Gtk.Button(label="＋ Custom")
-        custom_btn.set_relief(Gtk.ReliefStyle.NONE)
-        custom_btn.get_style_context().add_class("template-btn")
-        custom_btn.get_style_context().add_class("template-custom")
-        custom_btn.set_tooltip_text("Add your own custom commit prefix")
-        custom_btn.connect("clicked", self._add_custom_template)
-        tmpl_box.pack_start(custom_btn, False, False, 0)
-
-        self._refresh_template_buttons()
+        for name, prefix in COMMIT_TEMPLATES:
+            btn = Gtk.Button(label=name)
+            btn.set_relief(Gtk.ReliefStyle.NONE)
+            btn.get_style_context().add_class("template-btn")
+            btn.set_tooltip_text(f"Prepend '{prefix}'")
+            btn.connect("clicked", self._apply_template, prefix)
+            tmpl_box.pack_start(btn, False, False, 0)
 
         card.pack_start(tmpl_box, False, False, 0)
 
@@ -458,11 +332,19 @@ class CommitPanel(Gtk.Box):
         self.commit_entry = Gtk.Entry()
         self.commit_entry.set_placeholder_text("Commit message…")
         self.commit_entry.connect("activate", self._do_commit)
+        self.commit_entry.connect("changed", self._validate_commit_message)
         row.pack_start(self.commit_entry, True, True, 0)
         btn = Gtk.Button(label="Commit")
         btn.connect("clicked", self._do_commit)
         row.pack_start(btn, False, False, 0)
         card.pack_start(row, False, False, 0)
+
+        self.commit_validator_lbl = Gtk.Label(label="Start typing a commit message…")
+        self.commit_validator_lbl.set_halign(Gtk.Align.START)
+        self.commit_validator_lbl.set_line_wrap(True)
+        self.commit_validator_lbl.get_style_context().add_class("commit-validator-neutral")
+        card.pack_start(self.commit_validator_lbl, False, False, 0)
+
         self.commit_result = self._result_lbl()
         card.pack_start(self.commit_result, False, False, 0)
         return card
@@ -578,142 +460,45 @@ class CommitPanel(Gtk.Box):
             changed = len(status.splitlines()) if status else 0
             self.status_label.set_text(f"⎇  {branch}   |   {changed} changed file(s)")
 
-    def _get_commit_templates(self):
-        """Return built-in + custom commit templates."""
-        custom = settings.get("custom_commit_templates") or []
-        templates = list(DEFAULT_COMMIT_TEMPLATES)
-
-        for item in custom:
-            name = item.get("name", "").strip()
-            prefix = item.get("prefix", "").strip()
-            if not name:
-                continue
-
-            templates.append({
-                "name": name,
-                "prefix": prefix or f"{name}: ",
-                "description": item.get("description", "Custom commit type."),
-                "example": item.get("example", f"{name}: update project"),
-                "style": "template-custom",
-            })
-
-        return templates
-
-    def _refresh_template_buttons(self):
-        """Rebuild commit template chips."""
-        for child in self.template_buttons_box.get_children():
-            self.template_buttons_box.remove(child)
-
+    def _known_commit_prefixes(self):
+        prefixes = []
         for tmpl in self._get_commit_templates():
-            btn = Gtk.Button(label=tmpl["name"])
-            btn.set_relief(Gtk.ReliefStyle.NONE)
-            btn.get_style_context().add_class("template-btn")
-            btn.get_style_context().add_class(tmpl.get("style", "template-custom"))
-            btn.set_tooltip_text(
-                f"{tmpl['name']} = {tmpl['description']}\n\n"
-                f"Example:\n{tmpl['example']}"
-            )
-            btn.connect("clicked", self._apply_template, tmpl["prefix"])
-            self.template_buttons_box.pack_start(btn, False, False, 0)
+            prefix = tmpl.get("prefix", "").strip()
+            if prefix.endswith(":"):
+                prefixes.append(prefix + " ")
+            elif prefix:
+                prefixes.append(prefix)
+        return prefixes
 
-        self.template_buttons_box.show_all()
+    def _set_commit_validator_state(self, css_class, text):
+        ctx = self.commit_validator_lbl.get_style_context()
+        for cls in ["commit-validator-neutral", "commit-validator-good", "commit-validator-warn", "commit-validator-bad"]:
+            ctx.remove_class(cls)
+        ctx.add_class(css_class)
+        self.commit_validator_lbl.set_text(text)
 
-    def _show_template_help(self, _):
-        lines = []
-        for tmpl in self._get_commit_templates():
-            lines.append(
-                f"<b>{tmpl['name']}</b>\n"
-                f"{tmpl['description']}\n"
-                f"<tt>{tmpl['example']}</tt>\n"
-            )
+    def _validate_commit_message(self, _entry=None):
+        msg = self.commit_entry.get_text().strip()
+        if not hasattr(self, "commit_validator_lbl"):
+            return
 
-        dlg = Gtk.MessageDialog(
-            transient_for=self.get_toplevel(),
-            flags=0,
-            message_type=Gtk.MessageType.INFO,
-            buttons=Gtk.ButtonsType.OK,
-            text="Conventional commit types"
-        )
-        dlg.format_secondary_markup("\n".join(lines))
-        dlg.run()
-        dlg.destroy()
+        if not msg:
+            self._set_commit_validator_state("commit-validator-bad", "❌ Commit message is empty")
+            return
 
-    def _add_custom_template(self, _):
-        dlg = Gtk.Dialog(title="Add Custom Commit Type", transient_for=self.get_toplevel(), flags=0)
-        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-                        Gtk.STOCK_SAVE, Gtk.ResponseType.OK)
-        dlg.set_default_size(460, 280)
+        prefixes = self._known_commit_prefixes()
+        if any(msg.startswith(prefix) for prefix in prefixes):
+            if len(msg.split(":", 1)[-1].strip()) < 4:
+                self._set_commit_validator_state("commit-validator-warn", "⚠ Prefix is good, but description is very short")
+            else:
+                self._set_commit_validator_state("commit-validator-good", f"✅ Good commit: {msg[:70]}")
+            return
 
-        box = dlg.get_content_area()
-        box.set_border_width(12)
-        box.set_spacing(8)
+        if ":" in msg.split()[0] if msg.split() else False:
+            self._set_commit_validator_state("commit-validator-warn", "⚠ Unknown commit type. Use ℹ Types or add it as custom.")
+            return
 
-        grid = Gtk.Grid(column_spacing=10, row_spacing=8)
-
-        def label(text):
-            lbl = Gtk.Label(label=text)
-            lbl.set_halign(Gtk.Align.START)
-            return lbl
-
-        name_entry = Gtk.Entry()
-        name_entry.set_placeholder_text("e.g. security")
-
-        prefix_entry = Gtk.Entry()
-        prefix_entry.set_placeholder_text("e.g. security: ")
-
-        desc_entry = Gtk.Entry()
-        desc_entry.set_placeholder_text("e.g. Security-related changes")
-
-        example_entry = Gtk.Entry()
-        example_entry.set_placeholder_text("e.g. security: harden token handling")
-
-        grid.attach(label("Name:"), 0, 0, 1, 1)
-        grid.attach(name_entry, 1, 0, 1, 1)
-
-        grid.attach(label("Prefix:"), 0, 1, 1, 1)
-        grid.attach(prefix_entry, 1, 1, 1, 1)
-
-        grid.attach(label("Description:"), 0, 2, 1, 1)
-        grid.attach(desc_entry, 1, 2, 1, 1)
-
-        grid.attach(label("Example:"), 0, 3, 1, 1)
-        grid.attach(example_entry, 1, 3, 1, 1)
-
-        box.pack_start(grid, True, True, 0)
-
-        hint = Gtk.Label(label="Tip: common custom types could be security, ui, api, release, config.")
-        hint.get_style_context().add_class("dim-label")
-        hint.set_halign(Gtk.Align.START)
-        hint.set_line_wrap(True)
-        box.pack_start(hint, False, False, 0)
-
-        dlg.show_all()
-
-        if dlg.run() == Gtk.ResponseType.OK:
-            name = name_entry.get_text().strip().lower().replace(" ", "-")
-            prefix = prefix_entry.get_text().strip()
-            description = desc_entry.get_text().strip()
-            example = example_entry.get_text().strip()
-
-            if name:
-                if not prefix:
-                    prefix = f"{name}: "
-
-                custom = settings.get("custom_commit_templates") or []
-
-                # Replace existing custom with same name instead of duplicating.
-                custom = [t for t in custom if t.get("name") != name]
-                custom.append({
-                    "name": name,
-                    "prefix": prefix,
-                    "description": description or "Custom commit type.",
-                    "example": example or f"{prefix}update project",
-                })
-
-                settings.set_value("custom_commit_templates", custom)
-                self._refresh_template_buttons()
-
-        dlg.destroy()
+        self._set_commit_validator_state("commit-validator-warn", "⚠ Consider using feat:, fix:, docs:, refactor:, test:, chore:, etc.")
 
     def _apply_template(self, _, prefix):
         current = self.commit_entry.get_text()
