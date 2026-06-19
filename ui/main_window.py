@@ -41,7 +41,7 @@ class MainWindow(Gtk.Window):
         vbox.pack_start(outer_paned, True, True, 0)
 
         self.commit_panel = CommitPanel()
-        self.project_dashboard = ProjectDashboard()
+        self.project_dashboard = ProjectDashboard(on_commands_changed=lambda: self.project_list.refresh())
         self.project_list = ProjectListPanel(
             on_select=self._on_project_selected,
             on_code_review=self._run_code_review,

@@ -4,8 +4,8 @@ import subprocess
 import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Pango, Gdk
-from core import project_groups, settings
-from core.git_ops import is_git_repo, get_status, get_current_branch
+from core import project_groups, project_commands, settings
+from core.git_ops import is_git_repo, get_status, get_current_branch, run_custom
 from ui.checklist_window import ChecklistWindow
 
 STATUS_CLEAN    = "🟢"
@@ -249,6 +249,20 @@ class ProjectListPanel(Gtk.Box):
         btn_box.pack_end(rm, False, False, 0)
 
         vbox.pack_start(btn_box, False, False, 0)
+
+        pinned_commands = project_commands.get_pinned(path)
+        if pinned_commands:
+            pinned_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            pinned_box.set_margin_top(4)
+            for cmd in pinned_commands[:4]:
+                cbtn = Gtk.Button(label=f"⭐ {cmd.get('name', 'Command')}")
+                cbtn.set_tooltip_text(cmd.get("command", ""))
+                cbtn.set_relief(Gtk.ReliefStyle.NONE)
+                cbtn.get_style_context().add_class("action-btn")
+                cbtn.connect("clicked", lambda _, p=path, c=cmd: self._run_pinned_command(p, c))
+                pinned_box.pack_start(cbtn, False, False, 0)
+            vbox.pack_start(pinned_box, False, False, 0)
+
         row.add(vbox)
         return row
 
@@ -319,6 +333,23 @@ class ProjectListPanel(Gtk.Box):
     def _open_checklist(self, path):
         win = ChecklistWindow(self.get_toplevel(), path)
         win.show_all()
+
+    def _run_pinned_command(self, path, cmd):
+        branch = get_current_branch(path) if is_git_repo(path) else ""
+        rendered = project_commands.render(cmd.get("command", ""), path, branch)
+        if cmd.get("use_terminal"):
+            term = settings.get("terminal_cmd")
+            for t in [term, "kitty", "x-terminal-emulator", "gnome-terminal", "xterm"]:
+                try:
+                    if t == "kitty":
+                        subprocess.Popen(["kitty", "--hold", "bash", "-lc", rendered], cwd=path)
+                    else:
+                        subprocess.Popen([t, "--", "bash", "-lc", rendered], cwd=path)
+                    return
+                except FileNotFoundError:
+                    continue
+        else:
+            run_custom(path, rendered)
 
     def _on_key_press(self, widget, event):
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
