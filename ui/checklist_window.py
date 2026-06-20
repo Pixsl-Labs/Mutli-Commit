@@ -23,6 +23,7 @@ class ChecklistWindow(Gtk.Window):
             self.project_data["stages"] = []
 
         self.selected_stage_index = None
+        self.selected_item_index = None
         self._dirty = False
         self._autosave_timeout = None
         self._autosave_enabled = bool(self.project_data.get("autosave", True))
@@ -165,10 +166,10 @@ class ChecklistWindow(Gtk.Window):
         stage_scroll = Gtk.ScrolledWindow()
         self.stage_list = Gtk.ListBox()
         self.stage_list.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
+        self.stage_list.connect("row-selected", self._on_stage_selected)
         self.stage_list.connect("key-press-event", self._on_key_press)
         self.stage_list.connect("button-press-event", self._on_stage_list_button_press)
         self.stage_list.connect("button-press-event", self._on_stage_click_clear_selection)
-        self.items_list.connect("button-press-event", self._on_item_click_clear_selection)
         stage_scroll.add(self.stage_list)
         left.pack_start(stage_scroll, True, True, 0)
 
@@ -203,8 +204,10 @@ class ChecklistWindow(Gtk.Window):
         items_scroll.set_min_content_height(220)
         self.items_list = Gtk.ListBox()
         self.items_list.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
+        self.items_list.connect("row-selected", self._on_item_selected)
         self.items_list.connect("key-press-event", self._on_key_press)
         self.items_list.connect("button-press-event", self._on_items_list_button_press)
+        self.items_list.connect("button-press-event", self._on_item_click_clear_selection)
         items_scroll.add(self.items_list)
         right.pack_start(items_scroll, True, True, 0)
 
@@ -217,12 +220,12 @@ class ChecklistWindow(Gtk.Window):
         right.pack_start(Gtk.Separator(), False, False, 0)
 
         # Notes
-        notes_hdr = Gtk.Label()
-        notes_hdr.set_markup("<b>Stage Notes</b>")
-        notes_hdr.set_halign(Gtk.Align.START)
-        notes_hdr.set_margin_start(8)
-        notes_hdr.set_margin_top(6)
-        right.pack_start(notes_hdr, False, False, 0)
+        self.notes_hdr = Gtk.Label()
+        self.notes_hdr.set_markup("<b>Stage Notes</b>")
+        self.notes_hdr.set_halign(Gtk.Align.START)
+        self.notes_hdr.set_margin_start(8)
+        self.notes_hdr.set_margin_top(6)
+        right.pack_start(self.notes_hdr, False, False, 0)
 
         notes_scroll = Gtk.ScrolledWindow()
         notes_scroll.set_min_content_height(100)
@@ -312,6 +315,7 @@ class ChecklistWindow(Gtk.Window):
             return
 
         self.selected_stage_index = row.stage_index
+        self.selected_item_index = None
         self._set_right_enabled(True)
         self._refresh_items_list()
         self._refresh_stage_header()
@@ -384,24 +388,13 @@ class ChecklistWindow(Gtk.Window):
         row.item_index = index
         row.get_style_context().add_class("item-row")
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        outer.set_border_width(6)
-
         hbox = Gtk.Box(spacing=8)
+        hbox.set_border_width(6)
 
         check = Gtk.CheckButton()
         check.set_active(bool(item.get("done")))
         check.connect("toggled", self._on_item_toggled, index)
         hbox.pack_start(check, False, False, 0)
-
-        desc = item.get("description", "").strip()
-        arrow = None
-        revealer = None
-        if desc:
-            arrow = Gtk.ToggleButton(label="▸")
-            arrow.set_relief(Gtk.ReliefStyle.NONE)
-            arrow.set_tooltip_text("Show/hide task description")
-            hbox.pack_start(arrow, False, False, 0)
 
         lbl = Gtk.Label(label=item.get("text", ""))
         lbl.set_halign(Gtk.Align.START)
@@ -410,28 +403,15 @@ class ChecklistWindow(Gtk.Window):
         if item.get("done"):
             lbl.get_style_context().add_class("item-text-done")
         hbox.pack_start(lbl, True, True, 0)
-        outer.pack_start(hbox, False, False, 0)
 
-        if desc:
-            revealer = Gtk.Revealer()
-            revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
-            desc_lbl = Gtk.Label(label=desc)
-            desc_lbl.set_halign(Gtk.Align.START)
-            desc_lbl.set_xalign(0.0)
-            desc_lbl.set_line_wrap(True)
-            desc_lbl.get_style_context().add_class("item-description")
-            revealer.add(desc_lbl)
-            outer.pack_start(revealer, False, False, 0)
+        if item.get("description", "").strip():
+            desc_badge = Gtk.Label(label="📝")
+            desc_badge.set_tooltip_text("This task has a description. Click the task to view/edit it below.")
+            hbox.pack_end(desc_badge, False, False, 0)
 
-            def toggle_desc(btn):
-                active = btn.get_active()
-                btn.set_label("▾" if active else "▸")
-                revealer.set_reveal_child(active)
-
-            arrow.connect("toggled", toggle_desc)
-
-        row.add(outer)
+        row.add(hbox)
         return row
+
     def _on_item_toggled(self, check, index):
         stage = self._current_stage()
         if stage is None:
@@ -789,18 +769,57 @@ class ChecklistWindow(Gtk.Window):
     # ── Notes ────────────────────────────────────────────────────────────────
 
     def _load_notes(self):
+        self.selected_item_index = None
+        if hasattr(self, "notes_hdr"):
+            self.notes_hdr.set_markup("<b>Stage Notes</b>")
+
         stage = self._current_stage()
         notes = stage.get("notes", "") if stage else ""
+
         self.notes_buf.handler_block_by_func(self._on_notes_changed)
         self.notes_buf.set_text(notes)
+        self.notes_buf.handler_unblock_by_func(self._on_notes_changed)
+
+    def _on_item_selected(self, listbox, row):
+        if row is None or not hasattr(row, "item_index"):
+            return
+
+        self.selected_item_index = row.item_index
+        self._load_task_description(row.item_index)
+
+    def _load_task_description(self, index):
+        stage = self._current_stage()
+        if stage is None:
+            return
+
+        items = stage.get("items", [])
+        if not (0 <= index < len(items)):
+            return
+
+        if hasattr(self, "notes_hdr"):
+            self.notes_hdr.set_markup("<b>Task Description</b>")
+
+        desc = items[index].get("description", "")
+
+        self.notes_buf.handler_block_by_func(self._on_notes_changed)
+        self.notes_buf.set_text(desc)
         self.notes_buf.handler_unblock_by_func(self._on_notes_changed)
 
     def _on_notes_changed(self, buf):
         stage = self._current_stage()
         if stage is None:
             return
+
         start, end = buf.get_bounds()
-        stage["notes"] = buf.get_text(start, end, False)
+        text = buf.get_text(start, end, False)
+
+        if self.selected_item_index is not None:
+            items = stage.get("items", [])
+            if 0 <= self.selected_item_index < len(items):
+                items[self.selected_item_index]["description"] = text
+        else:
+            stage["notes"] = text
+
         self._mark_dirty()
 
     # ── Stage / item add & remove ───────────────────────────────────────────
@@ -924,6 +943,8 @@ class ChecklistWindow(Gtk.Window):
         index = row.item_index
         if 0 <= index < len(items):
             items.pop(index)
+            self.selected_item_index = None
+            self._load_notes()
 
         self._refresh_items_list()
         self._refresh_stage_header()
@@ -932,6 +953,51 @@ class ChecklistWindow(Gtk.Window):
         self._mark_dirty()
 
     # ── Import roadmap ───────────────────────────────────────────────────────
+
+    def _markdown_import_prompt(self):
+        project_name = os.path.basename(self.project_path) or "{name of the project}"
+        return f"""Create a {project_name} checklist roadmap using the exact Multi-Commit markdown format below.
+
+IMPORTANT OUTPUT RULE:
+Your reply must contain ONLY ONE copyable code block.
+Do not write any explanation before it.
+Do not write any explanation after it.
+Put the whole checklist inside the code block so I can copy and paste it directly into Multi-Commit.
+
+Use this exact structure inside the code block:
+
+# Stage 1 — Stage Name
+Notes: Optional stage-level notes/context goes here.
+
+- First task name
+Descript: Explain what needs doing and why.
+
+- Second task name
+Descript: Explain what needs doing and why.
+
+# Stage 2 — Another Stage
+Notes: Optional stage-level notes/context goes here.
+
+- Third task name
+Descript: Explain what needs doing and why.
+
+Rules:
+- Do not use checkbox syntax like [ ] or [x].
+- Use markdown headings for stages.
+- Use normal bullet points for tasks.
+- Use `Notes:` for stage-level notes.
+- Use `Descript:` directly under each task for task descriptions.
+- Keep task names short and clear.
+- Keep descriptions useful but not massive.
+- Do not use tables.
+- Do not use nested checkboxes.
+- Do not include anything outside the single code block."""
+
+
+    def _copy_markdown_import_prompt(self, _=None):
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(self._markdown_import_prompt(), -1)
+        self._show_info("Markdown checklist format copied to clipboard.")
 
     def _open_import_dialog(self, _):
         dlg = Gtk.Dialog(title="Paste / Import Roadmap", transient_for=self, flags=0)
@@ -947,13 +1013,29 @@ class ChecklistWindow(Gtk.Window):
         hint.set_markup(
             "Paste a markdown roadmap below.\n"
             "Headings (<tt>#</tt>, <tt>##</tt>, ...) become <b>stages</b>.\n"
-            "Numbered (<tt>1.</tt>) and bullet (<tt>-</tt> / <tt>*</tt>) lines become "
-            "<b>checklist items</b>.\n"
-            "Other text becomes stage <b>notes</b>."
+            "Use <tt>Notes:</tt> under a stage for stage-level notes.\n"
+            "Use bullet lines (<tt>- Task</tt>) or numbered lines for <b>checklist items</b>.\n"
+            "Use <tt>Descript:</tt> directly under a task for its <b>Task Description</b>.\n"
+            "Do not use checkbox syntax like <tt>[ ]</tt> or <tt>[x]</tt>."
         )
         hint.set_halign(Gtk.Align.START)
         hint.set_line_wrap(True)
         box.pack_start(hint, False, False, 0)
+
+
+        prompt_row = Gtk.Box(spacing=6)
+
+        copy_prompt_btn = Gtk.Button(label="📋 Copy Markdown Checklist Format")
+        copy_prompt_btn.set_tooltip_text("Copy the markdown checklist format to clipboard")
+        copy_prompt_btn.connect("clicked", self._copy_markdown_import_prompt)
+        prompt_row.pack_start(copy_prompt_btn, False, False, 0)
+
+        example_lbl = Gtk.Label(label="Markdown format: # Stage → Notes: → - Task → Descript:")
+        example_lbl.set_halign(Gtk.Align.START)
+        example_lbl.get_style_context().add_class("dim-label")
+        prompt_row.pack_start(example_lbl, True, True, 0)
+
+        box.pack_start(prompt_row, False, False, 0)
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_min_content_height(280)
@@ -1185,42 +1267,43 @@ class ChecklistWindow(Gtk.Window):
             return True
 
         return False
-    
-def _bulk_remove_selected_items(self):
-    stage = self._current_stage()
-    if stage is None:
-        return
 
-    rows = self.items_list.get_selected_rows()
-    indexes = sorted(
-        [row.item_index for row in rows if hasattr(row, "item_index")],
-        reverse=True
-    )
+    def _bulk_remove_selected_items(self):
+        stage = self._current_stage()
+        if stage is None:
+            return
 
-    if not indexes:
-        return
+        rows = self.items_list.get_selected_rows()
+        indexes = sorted(
+            [row.item_index for row in rows if hasattr(row, "item_index")],
+            reverse=True
+        )
 
-    dlg = Gtk.MessageDialog(
-        transient_for=self,
-        flags=0,
-        message_type=Gtk.MessageType.WARNING,
-        buttons=Gtk.ButtonsType.YES_NO,
-        text=f"Delete {len(indexes)} selected checklist item(s)?"
-    )
+        if not indexes:
+            return
 
-    if dlg.run() == Gtk.ResponseType.YES:
-        items = stage.get("items", [])
-        for index in indexes:
-            if 0 <= index < len(items):
-                items.pop(index)
+        dlg = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text=f"Delete {len(indexes)} selected checklist item(s)?"
+        )
 
-        self._refresh_items_list()
-        self._refresh_stage_header()
-        self._refresh_stage_list_progress_only()
-        self._update_overall_progress()
-        self._mark_dirty()
+        response = dlg.run()
+        dlg.destroy()
 
-    dlg.destroy()
+        if response == Gtk.ResponseType.YES:
+            items = stage.get("items", [])
+            for index in indexes:
+                if 0 <= index < len(items):
+                    items.pop(index)
+
+            self._refresh_items_list()
+            self._refresh_stage_header()
+            self._refresh_stage_list_progress_only()
+            self._update_overall_progress()
+            self._mark_dirty()
 
     def _bulk_remove_selected_stages(self):
         rows = self.stage_list.get_selected_rows()
@@ -1241,7 +1324,10 @@ def _bulk_remove_selected_items(self):
         )
         dlg.format_secondary_text("This also deletes all checklist items inside those stages.")
 
-        if dlg.run() == Gtk.ResponseType.YES:
+        response = dlg.run()
+        dlg.destroy()
+
+        if response == Gtk.ResponseType.YES:
             stages = self.project_data.get("stages", [])
             for index in indexes:
                 if 0 <= index < len(stages):
@@ -1251,13 +1337,10 @@ def _bulk_remove_selected_items(self):
             self._refresh_stage_list(keep_selection=False)
             self._mark_dirty()
 
-        dlg.destroy()
-
-    # ── Helpers ──────────────────────────────────────────────────────────────
-
     def _show_info(self, message, title="Info"):
         dlg = Gtk.MessageDialog(
-            transient_for=self, flags=0,
+            transient_for=self,
+            flags=0,
             message_type=Gtk.MessageType.INFO,
             buttons=Gtk.ButtonsType.OK,
             text=title
@@ -1273,7 +1356,6 @@ def _bulk_remove_selected_items(self):
             self.stage_list.unselect_all()
 
         return False
-
 
     def _on_item_click_clear_selection(self, widget, event):
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
