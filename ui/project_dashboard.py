@@ -6,7 +6,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Pango, Gdk, GLib
 from core import git_ops, settings, project_commands, activity
-
+from ui.session_manager import SessionManagerWindow
 
 class ProjectDashboard(Gtk.Box):
     def __init__(self, on_commands_changed=None):
@@ -48,6 +48,16 @@ class ProjectDashboard(Gtk.Box):
         self.path_lbl.set_ellipsize(Pango.EllipsizeMode.START)
         header.pack_start(self.path_lbl, False, False, 0)
         self.pack_start(header, False, False, 0)
+
+        session_row = Gtk.Box(spacing=6)
+        session_row.set_border_width(6)
+
+        session_btn = Gtk.Button(label="🚀 Launch Session")
+        session_btn.set_tooltip_text("Open VSCode, terminals, checklist, README, code review and default command")
+        session_btn.connect("clicked", self._launch_session)
+        session_row.pack_start(session_btn, True, True, 0)
+
+        self.pack_start(session_row, False, False, 0)
 
         refresh_row = Gtk.Box(spacing=6)
         refresh_row.set_border_width(6)
@@ -516,3 +526,10 @@ class ProjectDashboard(Gtk.Box):
         if self._refresh_source_id:
             GLib.source_remove(self._refresh_source_id)
             self._refresh_source_id = None
+
+    def _launch_session(self, _=None):
+        if not self.project_path:
+            return
+
+        win = SessionManagerWindow(self.get_toplevel(), self.project_path)
+        win.show_all()

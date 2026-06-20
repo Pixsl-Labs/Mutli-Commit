@@ -7,6 +7,7 @@ from gi.repository import Gtk, Pango, Gdk
 from core import project_groups, project_commands, settings
 from core.git_ops import is_git_repo, get_status, get_current_branch, run_custom
 from ui.checklist_window import ChecklistWindow
+from ui.session_manager import SessionManagerWindow
 
 STATUS_CLEAN    = "🟢"
 STATUS_UNSTAGED = "🟡"
@@ -234,6 +235,7 @@ class ProjectListPanel(Gtk.Box):
             ("🖥 Terminal", "Open a terminal in this project folder",       lambda _, p=path: self._open_terminal(p)),
             ("📋 Review",   "Generate a markdown code review for this project", lambda _, p=path: self._code_review(p)),
             ("✅ Checklist", "Open this project's roadmap/checklist",       lambda _, p=path: self._open_checklist(p)),
+            ("🚀 Session", "Launch project session manager", lambda _, p=path: self._open_session(p)),
         ]:
             btn = Gtk.Button(label=label)
             btn.set_tooltip_text(tip)
@@ -321,6 +323,10 @@ class ProjectListPanel(Gtk.Box):
                 return
             except FileNotFoundError:
                 continue
+
+    def _open_session(self, path):
+        win = SessionManagerWindow(self.get_toplevel(), path)
+        win.show_all()
 
     def _code_review(self, path):
         if self.on_code_review:
