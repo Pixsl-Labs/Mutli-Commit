@@ -4,7 +4,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Pango, Gdk
 
-from core import checklists
+from core import checklists, activity
 
 
 class ChecklistWindow(Gtk.Window):
@@ -985,6 +985,7 @@ class ChecklistWindow(Gtk.Window):
                     self.selected_stage_index = 0
                     self._refresh_stage_list(keep_selection=False)
                     self._mark_dirty()
+                    activity.log_event(self.project_path, "checklist_imported", "Imported checklist roadmap")
                 else:
                     self._show_info("No stages or items could be parsed from that text.")
             else:
@@ -1017,6 +1018,7 @@ class ChecklistWindow(Gtk.Window):
             try:
                 with open(out_path, "w", encoding="utf-8") as f:
                     f.write(markdown_text)
+                activity.log_event(self.project_path, "checklist_exported", f"Exported checklist to {out_path}")
                 self._show_info(f"Checklist exported to:\n{out_path}")
             except Exception as e:
                 self._show_info(f"Failed to export:\n{e}", title="Error")

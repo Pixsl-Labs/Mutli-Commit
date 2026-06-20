@@ -13,7 +13,7 @@ from ui.appearance_dialog import AppearanceDialog, apply_theme, load_theme
 from ui.checklist_window import ChecklistWindow
 from core import favourites
 from ui.update_dialog import UpdatePromptWindow
-from core import update_manager
+from core import update_manager, activity
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "icon.png")
 
@@ -212,6 +212,7 @@ class MainWindow(Gtk.Window):
         os.makedirs(output_dir, exist_ok=True)
         try:
             out_path = generate(target, output_dir)
+            activity.log_event(target, "code_review_generated", f"Generated code review: {out_path}")
             self.statusbar.push(0, f"✅ Code review saved: {out_path}")
             # Open the file in VSCode or xdg-open
             try:

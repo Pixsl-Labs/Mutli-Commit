@@ -6,7 +6,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, Pango
 from core import git_ops, settings, project_manager
-from core import notify
+from core import notify, activity
 from core.notes import get as get_note, save_note
 from ui.branch_panel import BranchPanel
 from ui.stash_panel import StashPanel
@@ -607,6 +607,11 @@ class CommitPanel(Gtk.Box):
             self._set_result(self.commit_result, False, "Commit message is empty!")
             return
         ok, out = git_ops.git_commit(self.project_path, msg)
+        activity.log_event(
+            self.project_path,
+            "commit_success" if ok else "commit_failed",
+            msg if ok else f"Commit failed: {out[:120]}",
+        )
         self._set_result(self.commit_result, ok, out)
         self._log(f"git commit \"{msg}\" → {'ok' if ok else out}")
         if ok:
@@ -620,6 +625,11 @@ class CommitPanel(Gtk.Box):
         if not self.project_path: return
         remote = self.remote_combo.get_active_text() or "origin"
         ok, out = git_ops.git_push(self.project_path, remote)
+        activity.log_event(
+            self.project_path,
+            "push_success" if ok else "push_failed",
+            f"{remote}: {out[:120] if out else 'pushed'}",
+        )
         self._set_result(self.push_result, ok, out)
         self._log(f"git push {remote} → {'ok' if ok else out}")
         proj = os.path.basename(self.project_path)
@@ -634,6 +644,11 @@ class CommitPanel(Gtk.Box):
         all_ok = True
         for r in remotes:
             ok, out = git_ops.git_push(self.project_path, r)
+            activity.log_event(
+                self.project_path,
+                "push_success" if ok else "push_failed",
+                f"{r}: {out[:120] if out else 'pushed'}",
+            )
             self._log(f"git push {r} → {'ok' if ok else out}")
             if not ok:
                 all_ok = False
@@ -641,7 +656,7 @@ class CommitPanel(Gtk.Box):
             else:
                 notify.pushed(r, os.path.basename(self.project_path))
         self._set_result(self.push_result, all_ok,
-                         f"Pushed to {len(remotes)} remote(s)" if all_ok else "Some pushes failed")
+                        f"Pushed to {len(remotes)} remote(s)" if all_ok else "Some pushes failed")
 
     def _do_push_auth_terminal(self, _):
         if not self.project_path: return

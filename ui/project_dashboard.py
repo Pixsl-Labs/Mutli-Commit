@@ -5,7 +5,7 @@ import subprocess
 import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Pango, Gdk, GLib
-from core import git_ops, settings, project_commands
+from core import git_ops, settings, project_commands, activity
 
 
 class ProjectDashboard(Gtk.Box):
@@ -97,16 +97,12 @@ class ProjectDashboard(Gtk.Box):
         self.inner.pack_start(self.health_box, False, False, 0)
 
         self.activity_box = self._card("🕘 Recent Activity")
-        self.activity_content = Gtk.Label(label="Activity log coming soon.")
-        self.activity_content.set_halign(Gtk.Align.START)
-        self.activity_content.get_style_context().add_class("dashboard-muted")
+        self.activity_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.activity_box.pack_start(self.activity_content, False, False, 0)
         self.inner.pack_start(self.activity_box, False, False, 0)
 
         self.metrics_box = self._card("📊 Metrics")
-        self.metrics_content = Gtk.Label(label="Metrics coming soon.")
-        self.metrics_content.set_halign(Gtk.Align.START)
-        self.metrics_content.get_style_context().add_class("dashboard-muted")
+        self.metrics_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.metrics_box.pack_start(self.metrics_content, False, False, 0)
         self.inner.pack_start(self.metrics_box, False, False, 0)
         self._refresh_empty()
@@ -159,6 +155,8 @@ class ProjectDashboard(Gtk.Box):
             return
         self._refresh_commands()
         self._refresh_health()
+        self._refresh_health()
+        self._refresh_metrics()
         self.show_all()
 
     def _refresh_empty(self):
@@ -180,6 +178,53 @@ class ProjectDashboard(Gtk.Box):
 
         for cmd in cmds:
             self.commands_content.pack_start(self._command_row(cmd), False, False, 0)
+
+    def _refresh_activity(self):
+        self._clear(self.activity_content)
+
+        if not self.project_path:
+            lbl = Gtk.Label(label="No project selected.")
+            lbl.set_halign(Gtk.Align.START)
+            lbl.get_style_context().add_class("dashboard-muted")
+            self.activity_content.pack_start(lbl, False, False, 0)
+            return
+
+        events = activity.recent(self.project_path, limit=8)
+
+        if not events:
+            lbl = Gtk.Label(label="No activity yet.")
+            lbl.set_halign(Gtk.Align.START)
+            lbl.get_style_context().add_class("dashboard-muted")
+            self.activity_content.pack_start(lbl, False, False, 0)
+            return
+
+        for event in events:
+            time_part = event.get("timestamp", "").split("T")[-1][:5]
+            msg = event.get("message", "")
+            lbl = Gtk.Label(label=f"{time_part}  {msg}")
+            lbl.set_halign(Gtk.Align.START)
+            lbl.set_xalign(0.0)
+            lbl.set_line_wrap(True)
+            lbl.get_style_context().add_class("dashboard-value")
+            self.activity_content.pack_start(lbl, False, False, 0)
+
+    def _refresh_metrics(self):
+        self._clear(self.metrics_content)
+
+        if not self.project_path:
+            lbl = Gtk.Label(label="No project selected.")
+            lbl.set_halign(Gtk.Align.START)
+            lbl.get_style_context().add_class("dashboard-muted")
+            self.metrics_content.pack_start(lbl, False, False, 0)
+            return
+
+        counts = activity.metrics(self.project_path, days=7)
+
+        self.metrics_content.pack_start(self._row("Commits", str(counts["commits"])), False, False, 0)
+        self.metrics_content.pack_start(self._row("Pushes", str(counts["pushes"])), False, False, 0)
+        self.metrics_content.pack_start(self._row("Commands", str(counts["commands"])), False, False, 0)
+        self.metrics_content.pack_start(self._row("Checklists", str(counts["checklists"])), False, False, 0)
+        self.metrics_content.pack_start(self._row("Code reviews", str(counts["code_reviews"])), False, False, 0)
 
     def _command_row(self, cmd):
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -270,11 +315,30 @@ class ProjectDashboard(Gtk.Box):
     def _run_command(self, cmd, terminal=False):
         if not self.project_path:
             return
+
         command = self._render(cmd)
-        if terminal or cmd.get("use_terminal"):
-            self._run_in_terminal(command)
-        else:
-            git_ops.run_custom(self.project_path, command)
+        self._busy = True
+
+        try:
+            if terminal or cmd.get("use_terminal"):
+                self._run_in_terminal(command)
+                activity.log_event(
+                    self.project_path,
+                    "command_terminal",
+                    f"Opened terminal command: {cmd.get('name', 'Command')}",
+                    {"command": command},
+                )
+            else:
+                ok, out = git_ops.run_custom(self.project_path, command)
+                activity.log_event(
+                    self.project_path,
+                    "command_run" if ok else "command_failed",
+                    f"{cmd.get('name', 'Command')}: {out[:120]}",
+                    {"command": command},
+                )
+        finally:
+            self._busy = False
+
         self.refresh()
 
     def _run_in_terminal(self, command):
@@ -293,7 +357,17 @@ class ProjectDashboard(Gtk.Box):
 
     def _copy_command(self, cmd):
         clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        clipboard.set_text(self._render(cmd), -1)
+        rendered = self._render(cmd)
+        clipboard.set_text(rendered, -1)
+
+        activity.log_event(
+            self.project_path,
+            "command_copied",
+            f"Copied command: {cmd.get('name', 'Command')}",
+            {"command": rendered},
+        )
+
+        self.refresh()
 
     def _toggle_pin(self, cmd):
         project_commands.set_pinned(self.project_path, cmd["id"], not cmd.get("pinned"))
