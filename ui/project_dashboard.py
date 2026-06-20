@@ -12,6 +12,8 @@ class ProjectDashboard(Gtk.Box):
     def __init__(self, on_commands_changed=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.project_path = None
+        self._refresh_source_id = None
+        self._busy = False
         self.on_commands_changed = on_commands_changed
         self.set_size_request(300, -1)
         self._apply_css()
@@ -46,6 +48,37 @@ class ProjectDashboard(Gtk.Box):
         self.path_lbl.set_ellipsize(Pango.EllipsizeMode.START)
         header.pack_start(self.path_lbl, False, False, 0)
         self.pack_start(header, False, False, 0)
+
+        refresh_row = Gtk.Box(spacing=6)
+        refresh_row.set_border_width(6)
+
+        refresh_btn = Gtk.Button(label="↻ Refresh")
+        refresh_btn.set_tooltip_text("Refresh repo health now")
+        refresh_btn.set_relief(Gtk.ReliefStyle.NONE)
+        refresh_btn.connect("clicked", lambda _: self.refresh())
+        refresh_row.pack_start(refresh_btn, False, False, 0)
+
+        refresh_lbl = Gtk.Label(label="Auto:")
+        refresh_lbl.get_style_context().add_class("dashboard-muted")
+        refresh_row.pack_start(refresh_lbl, False, False, 0)
+
+        self.refresh_combo = Gtk.ComboBoxText()
+        self.refresh_combo.append("0", "Off")
+        self.refresh_combo.append("30", "30s")
+        self.refresh_combo.append("60", "1m")
+        self.refresh_combo.append("300", "5m")
+
+        interval = str(settings.get("dashboard_refresh_interval") or 60)
+        self.refresh_combo.set_active_id(interval if interval in ["0", "30", "60", "300"] else "60")
+        self.refresh_combo.connect("changed", self._on_refresh_interval_changed)
+        refresh_row.pack_start(self.refresh_combo, False, False, 0)
+
+        self.last_refresh_lbl = Gtk.Label(label="Not refreshed yet")
+        self.last_refresh_lbl.get_style_context().add_class("dashboard-muted")
+        self.last_refresh_lbl.set_halign(Gtk.Align.END)
+        refresh_row.pack_end(self.last_refresh_lbl, True, True, 0)
+
+        self.pack_start(refresh_row, False, False, 0)
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -118,6 +151,7 @@ class ProjectDashboard(Gtk.Box):
         self.title_lbl.set_markup(f"<b>{os.path.basename(path)}</b>")
         self.path_lbl.set_text(path)
         self.refresh()
+        self.start_auto_refresh()
 
     def refresh(self):
         if not self.project_path:
@@ -219,6 +253,9 @@ class ProjectDashboard(Gtk.Box):
         self.health_content.pack_start(self._row("Latest", latest_commit if ok_commit and latest_commit else "none"), False, False, 0)
         self.health_content.pack_start(self._row("Stashes", str(len(stash_out.splitlines())) if ok_stash and stash_out else "0"), False, False, 0)
         self.health_content.pack_start(self._row("Tags", str(len(tags_out.splitlines())) if ok_tags and tags_out else "0"), False, False, 0)
+
+        from datetime import datetime
+        self.last_refresh_lbl.set_text("Last refreshed " + datetime.now().strftime("%H:%M:%S"))
 
     def _parse_ahead_behind(self, status_line):
         first = (status_line or "").splitlines()[0] if status_line else ""
@@ -367,3 +404,41 @@ class ProjectDashboard(Gtk.Box):
                     )
                 self._changed()
         dlg.destroy()
+
+    def _on_refresh_interval_changed(self, combo):
+        active = combo.get_active_id()
+        try:
+            interval = int(active or 60)
+        except ValueError:
+            interval = 60
+
+        settings.set_value("dashboard_refresh_interval", interval)
+        self._restart_auto_refresh()
+
+
+    def _restart_auto_refresh(self):
+        if self._refresh_source_id:
+            GLib.source_remove(self._refresh_source_id)
+            self._refresh_source_id = None
+
+        interval = int(settings.get("dashboard_refresh_interval") or 0)
+        if interval <= 0:
+            return
+
+        self._refresh_source_id = GLib.timeout_add_seconds(interval, self._auto_refresh_tick)
+
+
+    def _auto_refresh_tick(self):
+        if self.project_path and not self._busy:
+            self.refresh()
+        return True
+
+
+    def start_auto_refresh(self):
+        self._restart_auto_refresh()
+
+
+    def stop_auto_refresh(self):
+        if self._refresh_source_id:
+            GLib.source_remove(self._refresh_source_id)
+            self._refresh_source_id = None

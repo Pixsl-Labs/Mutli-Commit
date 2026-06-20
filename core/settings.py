@@ -13,7 +13,9 @@ DEFAULTS = {
     "terminal_cmd": "kitty",
     "default_remote": "origin",
     "code_review_output_dir": "~/Projects/Code Reviews",
-    "custom_commit_templates": []
+    "code_review_folders": ["~/Projects/Code Reviews"],
+    "custom_commit_templates": [],
+    "dashboard_refresh_interval": 60,
 }
 
 def _ensure_config():
