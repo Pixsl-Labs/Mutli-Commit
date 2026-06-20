@@ -11,7 +11,7 @@ from ui.settings_dialog import SettingsDialog
 from ui.command_manager import CommandManagerWindow
 from ui.appearance_dialog import AppearanceDialog, apply_theme, load_theme
 from ui.checklist_window import ChecklistWindow
-from core import favourites
+from core import favourites, config_backup
 from ui.update_dialog import UpdatePromptWindow
 from core import update_manager, activity
 from ui.code_review_manager import CodeReviewManagerWindow
@@ -102,8 +102,11 @@ class MainWindow(Gtk.Window):
         spacer_item.set_hexpand(True)  # GTK3 trick — won't visually push but groups nicely
         # We add Settings + Help last so they appear right of other items
         menubar.append(self._menu("Settings", [
-            ("Preferences…",         self._open_settings),
-            ("🎨 Appearance…",       self._open_appearance),
+            ("Preferences…",          self._open_settings),
+            ("🎨 Appearance…",        self._open_appearance),
+            None,
+            ("Export Config Backup",  self._export_config_backup),
+            ("Restore Config Backup", self._restore_config_backup),
         ]))
 
         menubar.append(self._menu("Help", [
@@ -306,3 +309,71 @@ class MainWindow(Gtk.Window):
             return
         win = ChecklistWindow(self, path)
         win.show_all()
+
+    def _export_config_backup(self, _=None):
+        dlg = Gtk.FileChooserDialog(
+            title="Export Multi-Commit Config Backup",
+            transient_for=self,
+            action=Gtk.FileChooserAction.SAVE,
+            buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                    Gtk.STOCK_SAVE, Gtk.ResponseType.OK)
+        )
+        dlg.set_do_overwrite_confirmation(True)
+        dlg.set_current_folder(os.path.expanduser("~/Projects"))
+        dlg.set_current_name("multi-commit-backup.zip")
+
+        if dlg.run() == Gtk.ResponseType.OK:
+            try:
+                out_path = config_backup.export_backup(dlg.get_filename())
+                activity.log_event("", "config_backup_exported", f"Exported config backup: {out_path}")
+                self.statusbar.push(0, f"✅ Config backup exported: {out_path}")
+            except Exception as e:
+                self.statusbar.push(0, f"❌ Backup failed: {e}")
+
+        dlg.destroy()
+
+    def _restore_config_backup(self, _=None):
+        dlg = Gtk.FileChooserDialog(
+            title="Restore Multi-Commit Config Backup",
+            transient_for=self,
+            action=Gtk.FileChooserAction.OPEN,
+            buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                    Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
+        )
+
+        file_filter = Gtk.FileFilter()
+        file_filter.set_name("Zip backups")
+        file_filter.add_pattern("*.zip")
+        dlg.add_filter(file_filter)
+
+        if dlg.run() != Gtk.ResponseType.OK:
+            dlg.destroy()
+            return
+
+        zip_path = dlg.get_filename()
+        dlg.destroy()
+
+        confirm = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text="Restore config backup?"
+        )
+        confirm.format_secondary_text(
+            "This will overwrite current Multi-Commit settings, projects, commands, checklists and notes.\n\n"
+            "Restart Multi-Commit after restoring."
+        )
+
+        response = confirm.run()
+        confirm.destroy()
+
+        if response != Gtk.ResponseType.YES:
+            return
+
+        try:
+            restored = config_backup.restore_backup(zip_path)
+            activity.log_event("", "config_backup_restored", f"Restored config backup: {zip_path}")
+            self.statusbar.push(0, f"✅ Restored backup: {', '.join(restored)}")
+        except Exception as e:
+            self.statusbar.push(0, f"❌ Restore failed: {e}")
