@@ -14,6 +14,7 @@ from ui.checklist_window import ChecklistWindow
 from core import favourites
 from ui.update_dialog import UpdatePromptWindow
 from core import update_manager, activity
+from ui.code_review_manager import CodeReviewManagerWindow
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "icon.png")
 
@@ -25,6 +26,7 @@ class MainWindow(Gtk.Window):
         self.set_border_width(0)
         self._cmd_manager_win = None
         self._appearance_win  = None
+        self._code_review_manager_win = None
 
         try:
             self.set_icon_from_file(os.path.abspath(ICON_PATH))
@@ -88,6 +90,10 @@ class MainWindow(Gtk.Window):
             None,
             ("Generate Code Review", self._run_code_review),
             ("✅ Open Checklist",     self._open_checklist),
+        ]))
+
+        menubar.append(self._menu("Code Reviews", [
+            ("Open Code Review Manager", self._open_code_review_manager),
         ]))
 
         # Spacer to push Settings + Help to the RIGHT
@@ -221,6 +227,13 @@ class MainWindow(Gtk.Window):
                 subprocess.Popen(["xdg-open", out_path])
         except Exception as e:
             self.statusbar.push(0, f"❌ Code review failed: {e}")
+
+    def _open_code_review_manager(self, _=None):
+        if self._code_review_manager_win and self._code_review_manager_win.get_visible():
+            self._code_review_manager_win.present()
+            return
+
+        self._code_review_manager_win = CodeReviewManagerWindow(self)
 
     # ── Help dialogs ─────────────────────────────────────────────────────────
 
