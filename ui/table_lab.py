@@ -97,6 +97,7 @@ class TableLabWindow(Gtk.Window):
         self.selected_function_id = None
         self.parsed_rows = []
         self.prefix_lines = []
+        self.source_column_defs = []
 
         self._loading = False
         self._programmatic = False
@@ -114,23 +115,14 @@ class TableLabWindow(Gtk.Window):
 
         self.connect("delete-event", self._on_close)
         self.show_all()
-        GLib.idle_add(self.present_bottom_left)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        GLib.idle_add(self.present)
 
     # ── Window behaviour ────────────────────────────────────────────────────
 
     def present_bottom_left(self):
-        try:
-            screen = self.get_screen() or Gdk.Screen.get_default()
-            monitor = screen.get_primary_monitor()
-            workarea = screen.get_monitor_workarea(monitor)
-            width, height = self.get_size()
-
-            x = workarea.x + 12
-            y = workarea.y + max(12, workarea.height - height - 42)
-            self.move(x, y)
-        except Exception:
-            pass
-
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.present()
         return False
 
     def _on_toggle_main_window(self, btn):
@@ -436,6 +428,11 @@ class TableLabWindow(Gtk.Window):
         parse_rows_btn.connect("clicked", self._parse_original_rows)
         output_header.pack_end(parse_rows_btn, False, False, 0)
 
+        infer_btn = Gtk.Button(label="Infer Table")
+        infer_btn.set_tooltip_text("Infer columns and rows directly from Original Output without needing Table Caller")
+        infer_btn.connect("clicked", self._infer_from_original_output)
+        output_header.pack_end(infer_btn, False, False, 0)
+
         output_box.pack_start(output_header, False, False, 0)
         output_box.pack_start(
             self._label("Paste the terminal output for this table. This lets the preview use real rows.", muted=True),
@@ -466,7 +463,7 @@ class TableLabWindow(Gtk.Window):
         control_grid = Gtk.Grid(column_spacing=6, row_spacing=6)
         control_grid.set_margin_bottom(4)
 
-        add_btn = Gtk.Button(label="+ Column")
+        add_btn = Gtk.Button(label="+ Blank Column")
         add_btn.connect("clicked", self._add_column)
         control_grid.attach(add_btn, 0, 0, 1, 1)
 
@@ -792,6 +789,7 @@ class TableLabWindow(Gtk.Window):
             "separator": self.separator_entry.get_text() or "-",
             "parsed_rows": self.parsed_rows,
             "prefix_lines": self.prefix_lines,
+            "source_column_defs": self.source_column_defs,
         }
 
     def _apply_payload(self, payload):
@@ -816,6 +814,7 @@ class TableLabWindow(Gtk.Window):
 
         self.parsed_rows = payload.get("parsed_rows", [])
         self.prefix_lines = payload.get("prefix_lines", [])
+        self.source_column_defs = payload.get("source_column_defs", [])
 
         self._loading = False
         self._build_preview()
@@ -1077,10 +1076,24 @@ class TableLabWindow(Gtk.Window):
         self._build_preview()
         self._mark_dirty()
 
-    def _add_column(self, _=None, title="New Column", width=12, align="<"):
-        self.column_store.append([title, int(width), align])
+    def _add_column(self, _=None, title="-", width=10, align="<"):
+        """
+        Add a blank placeholder column.
+
+        This avoids the confusing behaviour where a new column looks like it
+        reused an existing field. The user can then rename it and adjust width
+        / alignment using the controls.
+        """
+        tree_iter = self.column_store.append([title or "-", int(width), align or "<"])
+        path = self.column_store.get_path(tree_iter)
+
+        self.column_tree.get_selection().select_iter(tree_iter)
+        self.column_tree.scroll_to_cell(path, None, False, 0, 0)
+
+        self._update_column_controls()
         self._build_preview()
         self._mark_dirty()
+        self.status_lbl.set_text("Added blank column placeholder. Rename '-' when ready.")
 
     def _remove_selected_column(self, _=None):
         model, tree_iter = self._selected_column_iter()
@@ -1180,8 +1193,18 @@ class TableLabWindow(Gtk.Window):
     # ── Parsing ─────────────────────────────────────────────────────────────
 
     def _parse_everything(self, _=None):
-        self._parse_columns_from_caller()
-        self._parse_original_rows()
+        caller = self._get_text(self.caller_buf).strip()
+        original = self._get_text(self.original_buf).strip()
+
+        if caller:
+            self._parse_columns_from_caller()
+            self._parse_original_rows()
+        elif original:
+            self._infer_from_original_output()
+        else:
+            self._show_info("Paste either Table Caller code or Original Output first.")
+            return
+
         self._build_preview()
         self._generate_replacement_code()
 
@@ -1193,22 +1216,21 @@ class TableLabWindow(Gtk.Window):
 
         if match:
             raw = match.group(1)
-
             try:
                 parsed = ast.literal_eval(raw)
-
                 for item in parsed:
                     if isinstance(item, tuple) and len(item) in (2, 3):
                         title = str(item[0])
                         width = int(item[1])
                         align = item[2] if len(item) == 3 else "<"
+                        align = align if align in ("<", "^", ">") else "<"
                         columns.append((title, width, align))
             except Exception:
                 pass
 
         if not columns:
             tuple_re = re.compile(
-                r"\(\s*[\"']([^\"']+)[\"']\s*,\s*(\d+)(?:\s*,\s*[\"']([<^>])[\"'])?\s*\)"
+                r"\(\s*[\"']([^\"]+?)[\"']\s*,\s*(\d+)(?:\s*,\s*[\"']([<^>])[\"'])?\s*\)"
             )
 
             for title, width, align in tuple_re.findall(caller):
@@ -1218,17 +1240,153 @@ class TableLabWindow(Gtk.Window):
             self._show_info("No columns found. Paste a caller containing columns = [...] or add columns manually.")
             return
 
-        self._set_columns(columns)
-        self.status_lbl.set_text(f"✅ Parsed {len(columns)} column(s).")
+        self.source_column_defs = [
+            (str(title), int(width), str(align if align in ("<", "^", ">") else "<"))
+            for title, width, align in columns
+        ]
 
-    def _parse_original_rows(self, _=None):
+        self._set_columns(columns)
+        self._parse_original_rows()
+        self._build_preview()
+        self.status_lbl.set_text(f"✅ Parsed {len(columns)} source column(s).")
+
+    def _column_key(self, name):
+        return re.sub(r"\s+", " ", str(name)).strip().lower()
+
+    def _detect_header_chunks(self, header_line):
+        """
+        Split a fixed-width table header into column titles.
+
+        Uses 2+ spaces as the separator, so names like 'IP Address'
+        stay as one column.
+        """
+        indent = len(header_line) - len(header_line.lstrip(" "))
+        body = header_line[indent:].rstrip()
+
+        chunks = []
+        for match in re.finditer(r"\S(?:.*?\S)?(?=\s{2,}|$)", body):
+            title = match.group(0).strip()
+            if title:
+                chunks.append((title, indent + match.start()))
+
+        return chunks
+
+    def _infer_from_original_output(self, _=None):
+        """
+        Infer columns and rows directly from pasted terminal output.
+
+        This lets the user paste only the Original Output/Original Version,
+        without needing Table Caller code.
+        """
         original = strip_ansi(self._get_text(self.original_buf)).replace("\t", "    ")
-        columns = self._read_columns()
 
         self.prefix_lines = []
         self.parsed_rows = []
 
-        if not original.strip() or not columns:
+        if not original.strip():
+            self.status_lbl.set_text("Paste Original Output first.")
+            return
+
+        lines = original.splitlines()
+        separator_index = None
+
+        for index, line in enumerate(lines):
+            if re.match(r"^\s*-{5,}\s*$", line):
+                separator_index = index
+                break
+
+        if separator_index is None or separator_index == 0:
+            self.status_lbl.set_text("Could not find a header + ----- separator in Original Output.")
+            return
+
+        header_index = separator_index - 1
+        header_line = lines[header_index]
+        self.prefix_lines = lines[:header_index]
+
+        detected = self._detect_header_chunks(header_line)
+
+        if not detected:
+            self.status_lbl.set_text("Could not detect columns from the Original Output header.")
+            return
+
+        data_lines = [
+            line for line in lines[separator_index + 1:]
+            if line.strip()
+        ]
+
+        max_len = max(
+            [len(header_line.rstrip())]
+            + [len(line.rstrip()) for line in data_lines]
+            + [len(lines[separator_index].rstrip())]
+        )
+
+        inferred_columns = []
+
+        for index, (title, start) in enumerate(detected):
+            if index + 1 < len(detected):
+                end = detected[index + 1][1]
+            else:
+                end = max_len
+
+            width = max(len(title) + 2, end - start)
+
+            values = []
+            for raw in data_lines:
+                value = raw[start:end].strip() if end is not None else raw[start:].strip()
+                if value:
+                    values.append(value)
+
+            if values:
+                width = max(width, max(len(v) + 2 for v in values))
+
+            all_numeric = bool(values) and all(v.replace(".", "", 1).isdigit() for v in values)
+            align = "^" if all_numeric else "<"
+
+            inferred_columns.append((title, width, align))
+
+        self.source_column_defs = [
+            (title, width, align)
+            for title, width, align in inferred_columns
+        ]
+
+        self._set_columns(inferred_columns)
+
+        # Build row maps by original title.
+        for raw in data_lines:
+            row_map = {}
+
+            for index, (title, start) in enumerate(detected):
+                if index + 1 < len(detected):
+                    end = detected[index + 1][1]
+                else:
+                    end = None
+
+                value = raw[start:end].strip() if end is not None else raw[start:].strip()
+                row_map[str(title)] = value
+
+            if any(str(value).strip() for value in row_map.values()):
+                self.parsed_rows.append(row_map)
+
+        self._build_preview()
+        self._generate_replacement_code()
+        self._mark_dirty()
+        self.status_lbl.set_text(
+            f"✅ Inferred {len(inferred_columns)} column(s) and {len(self.parsed_rows)} row(s) from Original Output."
+        )
+
+
+    def _parse_original_rows(self, _=None):
+        original = strip_ansi(self._get_text(self.original_buf)).replace("\t", "    ")
+        source_columns = getattr(self, "source_column_defs", []) or self._read_columns()
+
+        if not source_columns and original.strip():
+            self._infer_from_original_output()
+            return
+
+        self.prefix_lines = []
+        self.parsed_rows = []
+
+        if not original.strip() or not source_columns:
             self.status_lbl.set_text("Paste Original Output and parse columns first.")
             return
 
@@ -1247,23 +1405,51 @@ class TableLabWindow(Gtk.Window):
         header_index = max(0, separator_index - 1)
         self.prefix_lines = lines[:header_index]
 
-        indent = int(self.indent_spin.get_value())
-        gap = int(self.gap_spin.get_value())
+        data_lines = [
+            line for line in lines[separator_index + 1:]
+            if line.strip()
+        ]
 
-        for raw in lines[separator_index + 1:]:
-            if not raw.strip():
-                continue
+        detected = self._detect_header_chunks(lines[header_index])
+        detected_titles = [title for title, _start in detected]
 
-            line = raw[indent:] if raw.startswith(" " * indent) else raw.lstrip()
-            values = []
-            pos = 0
+        # Best path: parse using header positions.
+        if detected:
+            for raw in data_lines:
+                row_map = {}
 
-            for _title, width, _align in columns:
-                values.append(line[pos:pos + width].strip())
-                pos += width + gap
+                for index, (title, start) in enumerate(detected):
+                    if index + 1 < len(detected):
+                        end = detected[index + 1][1]
+                    else:
+                        end = None
 
-            if any(values):
-                self.parsed_rows.append(values)
+                    row_map[str(title)] = raw[start:end].strip() if end is not None else raw[start:].strip()
+
+                if any(str(value).strip() for value in row_map.values()):
+                    self.parsed_rows.append(row_map)
+
+            self.source_column_defs = [
+                (title, width, align)
+                for title, width, align in source_columns
+                if title in detected_titles
+            ] or source_columns
+
+        else:
+            indent = int(self.indent_spin.get_value())
+            gap = int(self.gap_spin.get_value())
+
+            for raw in data_lines:
+                line = raw[indent:] if raw.startswith(" " * indent) else raw.lstrip()
+                row_map = {}
+                pos = 0
+
+                for title, width, _align in source_columns:
+                    row_map[str(title)] = line[pos:pos + int(width)].strip()
+                    pos += int(width) + gap
+
+                if any(str(value).strip() for value in row_map.values()):
+                    self.parsed_rows.append(row_map)
 
         self.status_lbl.set_text(f"✅ Parsed {len(self.parsed_rows)} row(s).")
         self._build_preview()
@@ -1275,7 +1461,7 @@ class TableLabWindow(Gtk.Window):
         columns = self._read_columns()
 
         if not columns:
-            return "No columns yet. Paste a Table Caller and click 1 Parse, or add columns manually."
+            return "No columns yet. Paste Original Output and click Infer Table, or paste Table Caller and click 1 Parse."
 
         indent = " " * int(self.indent_spin.get_value())
         gap = " " * int(self.gap_spin.get_value())
@@ -1302,18 +1488,36 @@ class TableLabWindow(Gtk.Window):
         rows = self.parsed_rows
 
         if not rows:
-            rows = [["example" for _ in columns]]
+            rows = [{str(title): "example" for title, _width, _align in columns}]
+
+        source_titles = [
+            str(title)
+            for title, _width, _align in (getattr(self, "source_column_defs", []) or columns)
+        ]
 
         for row in rows:
-            padded = []
+            if isinstance(row, dict):
+                lookup = {
+                    self._column_key(title): value
+                    for title, value in row.items()
+                }
+            else:
+                lookup = {
+                    self._column_key(source_titles[index]): value
+                    for index, value in enumerate(row)
+                    if index < len(source_titles)
+                }
 
-            for index, _column in enumerate(columns):
-                padded.append(row[index] if index < len(row) else "")
+            values = []
+
+            for title, _width, _align in columns:
+                value = lookup.get(self._column_key(title), "-")
+                values.append(value if str(value).strip() else "-")
 
             lines.append(
                 indent + gap.join(
                     format_cell(value, columns[index][1], columns[index][2])
-                    for index, value in enumerate(padded)
+                    for index, value in enumerate(values)
                 )
             )
 
