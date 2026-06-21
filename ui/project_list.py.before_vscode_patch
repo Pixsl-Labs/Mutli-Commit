@@ -24,19 +24,6 @@ def _get_status_icon(path):
         return STATUS_CONFLICT
     return STATUS_UNSTAGED
 
-def _open_vscode_path(path):
-    """Open a project path in VSCode with xdg-open fallback."""
-    path = os.path.abspath(os.path.expanduser(path))
-    cmd = settings.get("vscode_cmd") or "code"
-
-    try:
-        subprocess.Popen([cmd, path])
-    except Exception:
-        try:
-            subprocess.Popen(["xdg-open", path])
-        except Exception:
-            pass
-
 
 class ProjectListPanel(Gtk.Box):
     def __init__(self, on_select, on_code_review=None):
@@ -325,7 +312,8 @@ class ProjectListPanel(Gtk.Box):
         subprocess.Popen(["xdg-open", path])
 
     def _open_vscode(self, path):
-        _open_vscode_path(path)
+        cmd = settings.get("vscode_cmd")
+        subprocess.Popen([cmd, path])
 
     def _open_terminal(self, path):
         term = settings.get("terminal_cmd")

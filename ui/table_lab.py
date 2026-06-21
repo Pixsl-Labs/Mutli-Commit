@@ -88,13 +88,14 @@ def format_cell(value, width, align="<"):
 class TableLabWindow(Gtk.Window):
     def __init__(self, parent=None):
         super().__init__(title="🧪 Table Lab")
-        self.parent = parent
+        self.parent_window = parent
         self.selected_function_id = None
         self.parsed_rows = []
         self.prefix_lines = []
 
-        if parent is not None:
-            self.set_transient_for(parent)
+        # Deliberately not transient.
+        # Table Lab should survive when the main window is hidden,
+        # like the Checklist window.
 
         self.set_default_size(1180, 780)
         self.set_size_request(760, 520)
@@ -102,7 +103,36 @@ class TableLabWindow(Gtk.Window):
         self._apply_css()
         self._build()
         self._refresh_function_list()
+        self.connect("delete-event", self._on_close)
         self.show_all()
+
+    def _on_toggle_main_window(self, btn):
+        parent = getattr(self, "parent_window", None)
+
+        if parent is None:
+            btn.set_active(False)
+            return
+
+        if btn.get_active():
+            parent.hide()
+            btn.set_label("👁 Show Main Window")
+            self.present()
+        else:
+            parent.show()
+            parent.present()
+            btn.set_label("🙈 Hide Main Window")
+
+    def _restore_main_window_if_hidden(self):
+        parent = getattr(self, "parent_window", None)
+
+        if parent is not None and not parent.get_visible():
+            parent.show()
+            parent.present()
+
+    def _on_close(self, _window, _event):
+        self._restore_main_window_if_hidden()
+        return False
+
 
     # ── UI helpers ──────────────────────────────────────────────────────────
 
@@ -208,6 +238,11 @@ class TableLabWindow(Gtk.Window):
             "replacement code copied."
         ))
         toolbar.pack_start(copy_code_btn, False, False, 0)
+
+        self.main_win_btn = Gtk.ToggleButton(label="🙈 Hide Main Window")
+        self.main_win_btn.set_tooltip_text("Hide/show the main Multi-Commit window while keeping Table Lab open")
+        self.main_win_btn.connect("toggled", self._on_toggle_main_window)
+        toolbar.pack_end(self.main_win_btn, False, False, 0)
 
         self.status_lbl = Gtk.Label(label="Ready")
         self.status_lbl.set_halign(Gtk.Align.START)

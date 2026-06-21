@@ -84,6 +84,7 @@ _NUMBERED_RE = re.compile(r"^\s*\d+[.)]\s+(.*)$")
 _BULLET_RE = re.compile(r"^\s*[-*]\s+(.*)$")
 _CHECKBOX_RE = re.compile(r"^\[[ xX]\]\s+(.*)$")
 _DESCRIPT_RE = re.compile(r"^\s*Descript:\s*(.*)$", re.IGNORECASE)
+_NOTES_RE = re.compile(r"^\s*Notes?:\s*(.*)$", re.IGNORECASE)
 
 
 def parse_markdown_roadmap(text: str) -> list:
@@ -92,16 +93,18 @@ def parse_markdown_roadmap(text: str) -> list:
 
     Rules:
     - Lines starting with #, ##, ### etc. start a new stage.
+    - Notes: lines become stage notes.
     - Numbered and bullet items become checklist items.
-    - Optional `Descript:` lines directly after an item become that item's description.
-    - Extra indented/plain lines after `Descript:` continue the description until the next item/heading.
-    - Other non-empty plain text becomes stage notes.
+    - Descript: lines directly after an item become that item's task description.
+    - Extra lines after Notes: continue notes until the next item/heading.
+    - Extra lines after Descript: continue description until the next item/heading.
     - Checkbox syntax [ ]/[x] is tolerated but stripped.
     """
     stages = []
     current = None
     last_item = None
     in_description = False
+    in_notes = False
 
     def ensure_current():
         nonlocal current
@@ -117,11 +120,28 @@ def parse_markdown_roadmap(text: str) -> list:
             return checkbox.group(1).strip()
         return raw
 
+    def append_stage_note(stage: dict, note: str):
+        note = note.strip()
+        if not note:
+            return
+        if stage.get("notes"):
+            stage["notes"] += "\n" + note
+        else:
+            stage["notes"] = note
+
+    def append_item_description(item: dict, desc: str):
+        desc = desc.strip()
+        if not desc:
+            return
+        existing = item.get("description", "").strip()
+        item["description"] = (existing + "\n" + desc).strip() if existing else desc
+
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
 
         if not line.strip():
             in_description = False
+            in_notes = False
             continue
 
         heading_match = _HEADING_RE.match(line)
@@ -132,15 +152,23 @@ def parse_markdown_roadmap(text: str) -> list:
                 stages.append(current)
                 last_item = None
                 in_description = False
+                in_notes = False
+            continue
+
+        notes_match = _NOTES_RE.match(line)
+        if notes_match:
+            stage = ensure_current()
+            append_stage_note(stage, notes_match.group(1))
+            last_item = None
+            in_description = False
+            in_notes = True
             continue
 
         descript_match = _DESCRIPT_RE.match(line)
         if descript_match and last_item is not None:
-            desc = descript_match.group(1).strip()
-            if desc:
-                existing = last_item.get("description", "").strip()
-                last_item["description"] = (existing + "\n" + desc).strip() if existing else desc
+            append_item_description(last_item, descript_match.group(1))
             in_description = True
+            in_notes = False
             continue
 
         numbered_match = _NUMBERED_RE.match(line)
@@ -152,19 +180,18 @@ def parse_markdown_roadmap(text: str) -> list:
                 last_item = new_item(item_text)
                 ensure_current()["items"].append(last_item)
                 in_description = False
+                in_notes = False
             continue
 
-        # Continuation line for a Descript block.
         if in_description and last_item is not None:
-            existing = last_item.get("description", "").strip()
-            last_item["description"] = (existing + "\n" + line.strip()).strip() if existing else line.strip()
+            append_item_description(last_item, line)
             continue
 
-        stage = ensure_current()
-        if stage["notes"]:
-            stage["notes"] += "\n" + line.strip()
-        else:
-            stage["notes"] = line.strip()
+        if in_notes:
+            append_stage_note(ensure_current(), line)
+            continue
+
+        append_stage_note(ensure_current(), line)
 
     return stages
 

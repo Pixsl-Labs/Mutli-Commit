@@ -65,6 +65,8 @@ class MainWindow(Gtk.Window):
         self.statusbar.push(0, "Ready — select a project to begin")
         vbox.pack_end(self.statusbar, False, False, 0)
 
+        self.connect("delete-event", self._on_main_delete_event)
+
         GLib.timeout_add(1200, self._startup_update_check)
 
     # ── Menubar ──────────────────────────────────────────────────────────────
@@ -244,16 +246,47 @@ class MainWindow(Gtk.Window):
 
         self._code_review_manager_win = CodeReviewManagerWindow(self)
 
+    def _table_lab_is_open(self):
+        return getattr(self, "_table_lab_win", None) is not None
+
+
+    def _on_main_delete_event(self, _window, _event):
+        """
+        Let Table Lab survive when the main window is closed.
+
+        If Table Lab exists, hide the main window instead of destroying it.
+        If Table Lab is not open, allow the normal close/quit behaviour.
+        """
+        if self._table_lab_is_open():
+            self.hide()
+
+            try:
+                self._table_lab_win.present()
+            except Exception:
+                pass
+
+            return True
+
+        return False
+
+
+    def _on_table_lab_destroy(self, *_):
+        self._table_lab_win = None
+
+        # If the user closed the main window while using Table Lab,
+        # bring the main window back when Table Lab closes.
+        if not self.get_visible():
+            self.show()
+            self.present()
+
+
     def _open_table_lab(self, _=None):
         if self._table_lab_win is not None and self._table_lab_win.get_visible():
             self._table_lab_win.present()
             return
 
         self._table_lab_win = TableLabWindow(self)
-        self._table_lab_win.connect(
-            "destroy",
-            lambda *_: setattr(self, "_table_lab_win", None)
-        )
+        self._table_lab_win.connect("destroy", self._on_table_lab_destroy)
         self._table_lab_win.show_all()
 
 
