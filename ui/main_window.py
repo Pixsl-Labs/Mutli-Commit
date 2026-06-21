@@ -15,6 +15,7 @@ from core import favourites, config_backup
 from ui.update_dialog import UpdatePromptWindow
 from core import update_manager, activity
 from ui.code_review_manager import CodeReviewManagerWindow
+from ui.table_lab import TableLabWindow
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "icon.png")
 
@@ -27,6 +28,7 @@ class MainWindow(Gtk.Window):
         self._cmd_manager_win = None
         self._appearance_win  = None
         self._code_review_manager_win = None
+        self._table_lab_win = None
 
         try:
             self.set_icon_from_file(os.path.abspath(ICON_PATH))
@@ -94,6 +96,10 @@ class MainWindow(Gtk.Window):
 
         menubar.append(self._menu("Code Reviews", [
             ("Open Code Review Manager", self._open_code_review_manager),
+        ]))
+
+        menubar.append(self._menu("Tools", [
+            ("🧪 Table Lab", self._open_table_lab),
         ]))
 
         # Spacer to push Settings + Help to the RIGHT
@@ -237,6 +243,19 @@ class MainWindow(Gtk.Window):
             return
 
         self._code_review_manager_win = CodeReviewManagerWindow(self)
+
+    def _open_table_lab(self, _=None):
+        if self._table_lab_win is not None and self._table_lab_win.get_visible():
+            self._table_lab_win.present()
+            return
+
+        self._table_lab_win = TableLabWindow(self)
+        self._table_lab_win.connect(
+            "destroy",
+            lambda *_: setattr(self, "_table_lab_win", None)
+        )
+        self._table_lab_win.show_all()
+
 
     # ── Help dialogs ─────────────────────────────────────────────────────────
 
