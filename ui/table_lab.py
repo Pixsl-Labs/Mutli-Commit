@@ -1,17 +1,15 @@
-"""Table Lab — CLI table spacing designer/debugger."""
+"""Table Lab — simple CLI table spacing designer/debugger."""
 import ast
-import os
 import re
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk, Pango
+from gi.repository import Gtk, Gdk, Pango, GLib
 
 from core import table_lab
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
 
 EXAMPLE_CALLER = '''print_section_header(
     "Suspicious IPs (Failed Attempts)",
@@ -54,7 +52,6 @@ for result in results:
     )
 '''
 
-
 EXAMPLE_OUTPUT = '''=== Suspicious IPs (Failed Attempts) ===
 
    Suspicious IPs Detected: 7
@@ -72,7 +69,7 @@ EXAMPLE_OUTPUT = '''=== Suspicious IPs (Failed Attempts) ===
 
 
 def strip_ansi(text):
-    return ANSI_RE.sub("", text)
+    return ANSI_RE.sub("", text or "")
 
 
 def format_cell(value, width, align="<"):
@@ -89,22 +86,52 @@ class TableLabWindow(Gtk.Window):
     def __init__(self, parent=None):
         super().__init__(title="🧪 Table Lab")
         self.parent_window = parent
+
+        # Standalone window — do not use set_transient_for(parent).
+        # This allows Table Lab to stay open if the main window is hidden.
+        self.set_default_size(860, 560)
+        self.set_size_request(660, 420)
+        self.set_resizable(True)
+
+        self.current_session_id = None
         self.selected_function_id = None
         self.parsed_rows = []
         self.prefix_lines = []
 
-        # Deliberately not transient.
-        # Table Lab should survive when the main window is hidden,
-        # like the Checklist window.
-
-        self.set_default_size(1180, 780)
-        self.set_size_request(760, 520)
+        self._loading = False
+        self._programmatic = False
+        self._syncing_column_controls = False
+        self._dirty = False
+        self._autosave_timeout = None
 
         self._apply_css()
         self._build()
         self._refresh_function_list()
+        self._refresh_session_combo()
+        self._load_first_function()
+        self._update_column_controls()
+        self._update_dirty_label()
+
         self.connect("delete-event", self._on_close)
         self.show_all()
+        GLib.idle_add(self.present_bottom_left)
+
+    # ── Window behaviour ────────────────────────────────────────────────────
+
+    def present_bottom_left(self):
+        try:
+            screen = self.get_screen() or Gdk.Screen.get_default()
+            monitor = screen.get_primary_monitor()
+            workarea = screen.get_monitor_workarea(monitor)
+            width, height = self.get_size()
+
+            x = workarea.x + 12
+            y = workarea.y + max(12, workarea.height - height - 42)
+            self.move(x, y)
+        except Exception:
+            pass
+
+        return False
 
     def _on_toggle_main_window(self, btn):
         parent = getattr(self, "parent_window", None)
@@ -115,12 +142,12 @@ class TableLabWindow(Gtk.Window):
 
         if btn.get_active():
             parent.hide()
-            btn.set_label("👁 Show Main Window")
+            btn.set_label("👁 Show Main")
             self.present()
         else:
             parent.show()
             parent.present()
-            btn.set_label("🙈 Hide Main Window")
+            btn.set_label("🙈 Hide Main")
 
     def _restore_main_window_if_hidden(self):
         parent = getattr(self, "parent_window", None)
@@ -130,14 +157,32 @@ class TableLabWindow(Gtk.Window):
             parent.present()
 
     def _on_close(self, _window, _event):
+        if self._dirty and not self.autosave_switch.get_active():
+            response = self._save_discard_cancel(
+                "You have unsaved Table Lab changes.\nSave this session before closing?"
+            )
+
+            if response == "cancel":
+                return True
+
+            if response == "save":
+                self._save_session()
+
+        elif self._dirty and self.autosave_switch.get_active():
+            self._save_session(silent=True)
+
         self._restore_main_window_if_hidden()
         return False
 
-
-    # ── UI helpers ──────────────────────────────────────────────────────────
+    # ── Styling / small helpers ─────────────────────────────────────────────
 
     def _apply_css(self):
         css = b"""
+        .lab-toolbar {
+            background: alpha(white, 0.04);
+            border-bottom: 1px solid alpha(white, 0.08);
+            padding: 6px;
+        }
         .lab-section-title {
             font-weight: bold;
             font-size: 12px;
@@ -146,13 +191,20 @@ class TableLabWindow(Gtk.Window):
             opacity: 0.62;
             font-size: 10px;
         }
-        .lab-toolbar {
-            background: alpha(white, 0.04);
-            border-bottom: 1px solid alpha(white, 0.08);
-            padding: 8px;
-        }
         .lab-code {
             font-family: monospace;
+            font-size: 11px;
+        }
+        .lab-step {
+            font-weight: bold;
+            font-size: 13px;
+        }
+        .lab-unsaved {
+            color: #f39c12;
+            font-size: 11px;
+        }
+        .lab-saved {
+            color: #2ecc71;
             font-size: 11px;
         }
         """
@@ -164,24 +216,29 @@ class TableLabWindow(Gtk.Window):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
-    def _label(self, text, muted=False):
+    def _label(self, text, muted=False, step=False):
         lbl = Gtk.Label(label=text)
         lbl.set_halign(Gtk.Align.START)
-        lbl.get_style_context().add_class("lab-muted" if muted else "lab-section-title")
+
+        if step:
+            lbl.get_style_context().add_class("lab-step")
+        elif muted:
+            lbl.get_style_context().add_class("lab-muted")
+        else:
+            lbl.get_style_context().add_class("lab-section-title")
+
         return lbl
 
-    def _text_view(self, monospace=True, editable=True):
+    def _text_view(self, editable=True, wrap=False):
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
 
         buf = Gtk.TextBuffer()
         view = Gtk.TextView(buffer=buf)
-        view.set_wrap_mode(Gtk.WrapMode.NONE)
         view.set_editable(editable)
-
-        if monospace:
-            view.set_monospace(True)
-            view.get_style_context().add_class("lab-code")
+        view.set_monospace(True)
+        view.get_style_context().add_class("lab-code")
+        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR if wrap else Gtk.WrapMode.NONE)
 
         scroll.add(view)
         return scroll, view, buf
@@ -190,15 +247,20 @@ class TableLabWindow(Gtk.Window):
         start, end = buf.get_bounds()
         return buf.get_text(start, end, False)
 
-    def _set_text(self, buf, text):
+    def _set_text(self, buf, text, mark=False):
+        self._programmatic = True
         buf.set_text(text or "")
+        self._programmatic = False
 
-    def _copy_text(self, text, label="Copied to clipboard."):
+        if mark:
+            self._mark_dirty()
+
+    def _copy_text(self, text, label="Copied."):
         clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         clipboard.set_text(text or "", -1)
         self.status_lbl.set_text("✅ " + label)
 
-    def _info(self, message, title="Table Lab"):
+    def _show_info(self, message, title="Table Lab"):
         dlg = Gtk.MessageDialog(
             transient_for=self,
             flags=0,
@@ -210,269 +272,641 @@ class TableLabWindow(Gtk.Window):
         dlg.run()
         dlg.destroy()
 
-    # ── Build layout ────────────────────────────────────────────────────────
+    def _save_discard_cancel(self, message):
+        dlg = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text="Unsaved Table Lab session",
+        )
+        dlg.format_secondary_text(message)
+        dlg.add_button("Discard", Gtk.ResponseType.REJECT)
+        dlg.add_button(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL)
+        dlg.add_button("Save", Gtk.ResponseType.ACCEPT)
+        dlg.set_default_response(Gtk.ResponseType.ACCEPT)
+
+        response = dlg.run()
+        dlg.destroy()
+
+        if response == Gtk.ResponseType.ACCEPT:
+            return "save"
+        if response == Gtk.ResponseType.REJECT:
+            return "discard"
+        return "cancel"
+
+    # ── Layout ──────────────────────────────────────────────────────────────
 
     def _build(self):
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.add(root)
 
-        toolbar = Gtk.Box(spacing=8)
-        toolbar.get_style_context().add_class("lab-toolbar")
+        toolbar_scroll = Gtk.ScrolledWindow()
+        toolbar_scroll.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.NEVER)
+        toolbar_scroll.set_propagate_natural_height(True)
 
-        parse_btn = Gtk.Button(label="🔍 Parse Caller Columns")
-        parse_btn.set_tooltip_text("Read the columns = [...] block from the Table Caller box")
-        parse_btn.connect("clicked", self._parse_columns_from_caller)
+        toolbar = Gtk.Box(spacing=6)
+        toolbar.get_style_context().add_class("lab-toolbar")
+        toolbar_scroll.add(toolbar)
+
+        toolbar.pack_start(self._label("Session:", muted=True), False, False, 0)
+
+        self.session_name_entry = Gtk.Entry()
+        self.session_name_entry.set_width_chars(22)
+        self.session_name_entry.set_placeholder_text("e.g. Suspicious IPs table")
+        self.session_name_entry.connect("changed", self._on_text_changed)
+        toolbar.pack_start(self.session_name_entry, False, False, 0)
+
+        save_btn = Gtk.Button(label="💾 Save")
+        save_btn.set_tooltip_text("Save this Table Lab session")
+        save_btn.connect("clicked", lambda _: self._save_session())
+        toolbar.pack_start(save_btn, False, False, 0)
+
+        new_btn = Gtk.Button(label="New")
+        new_btn.connect("clicked", self._new_session)
+        toolbar.pack_start(new_btn, False, False, 0)
+
+        toolbar.pack_start(self._label("Recent:", muted=True), False, False, 0)
+
+        self.recent_combo = Gtk.ComboBoxText()
+        self.recent_combo.set_tooltip_text("Load a recent Table Lab session")
+        self.recent_combo.connect("changed", self._on_recent_session_changed)
+        toolbar.pack_start(self.recent_combo, False, False, 0)
+
+        self.autosave_switch = Gtk.Switch()
+        self.autosave_switch.set_active(True)
+        self.autosave_switch.connect("notify::active", self._on_autosave_toggled)
+
+        autosave_box = Gtk.Box(spacing=4)
+        autosave_box.pack_start(self._label("Autosave", muted=True), False, False, 0)
+        autosave_box.pack_start(self.autosave_switch, False, False, 0)
+        toolbar.pack_start(autosave_box, False, False, 8)
+
+        parse_btn = Gtk.Button(label="1 Parse")
+        parse_btn.set_tooltip_text("Parse columns from the Table Caller and rows from Original Output")
+        parse_btn.connect("clicked", self._parse_everything)
         toolbar.pack_start(parse_btn, False, False, 0)
 
-        preview_btn = Gtk.Button(label="👀 Build Updated Preview")
+        preview_btn = Gtk.Button(label="2 Preview")
+        preview_btn.set_tooltip_text("Build the updated preview")
         preview_btn.connect("clicked", self._build_preview)
         toolbar.pack_start(preview_btn, False, False, 0)
 
-        code_btn = Gtk.Button(label="⚙ Generate Replacement Code")
+        code_btn = Gtk.Button(label="3 Generate Code")
+        code_btn.set_tooltip_text("Generate updated replacement code")
         code_btn.connect("clicked", self._generate_replacement_code)
         toolbar.pack_start(code_btn, False, False, 0)
 
-        copy_code_btn = Gtk.Button(label="📋 Copy Replacement Code")
-        copy_code_btn.connect("clicked", lambda _: self._copy_text(
+        copy_btn = Gtk.Button(label="📋 Copy Code")
+        copy_btn.set_tooltip_text("Copy Generated Replacement Code")
+        copy_btn.connect("clicked", lambda _: self._copy_text(
             self._get_text(self.generated_buf),
-            "replacement code copied."
+            "Generated Replacement Code copied."
         ))
-        toolbar.pack_start(copy_code_btn, False, False, 0)
+        toolbar.pack_start(copy_btn, False, False, 0)
 
-        self.main_win_btn = Gtk.ToggleButton(label="🙈 Hide Main Window")
-        self.main_win_btn.set_tooltip_text("Hide/show the main Multi-Commit window while keeping Table Lab open")
+        help_btn = Gtk.Button(label="Help")
+        help_btn.connect("clicked", self._show_help)
+        toolbar.pack_start(help_btn, False, False, 0)
+
+        self.main_win_btn = Gtk.ToggleButton(label="🙈 Hide Main")
         self.main_win_btn.connect("toggled", self._on_toggle_main_window)
-        toolbar.pack_end(self.main_win_btn, False, False, 0)
+        toolbar.pack_start(self.main_win_btn, False, False, 0)
 
         self.status_lbl = Gtk.Label(label="Ready")
         self.status_lbl.set_halign(Gtk.Align.START)
-        toolbar.pack_end(self.status_lbl, True, True, 0)
+        toolbar.pack_start(self.status_lbl, True, True, 0)
 
-        root.pack_start(toolbar, False, False, 0)
+        self.dirty_lbl = Gtk.Label(label="")
+        self.dirty_lbl.set_halign(Gtk.Align.END)
+        toolbar.pack_end(self.dirty_lbl, False, False, 0)
 
-        vertical = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
-        vertical.set_position(360)
-        root.pack_start(vertical, True, True, 0)
+        root.pack_start(toolbar_scroll, False, False, 0)
 
-        top_and_middle = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
-        top_and_middle.set_position(245)
-        vertical.pack1(top_and_middle, resize=True, shrink=False)
+        self.notebook = Gtk.Notebook()
+        root.pack_start(self.notebook, True, True, 0)
 
-        top = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        top.set_position(560)
-        top_and_middle.pack1(top, resize=True, shrink=False)
+        self.notebook.append_page(self._build_input_tab(), Gtk.Label(label="1 Input"))
+        self.notebook.append_page(self._build_tune_tab(), Gtk.Label(label="2 Tune"))
+        self.notebook.append_page(self._build_code_tab(), Gtk.Label(label="3 Code"))
+        self.notebook.append_page(self._build_helpers_tab(), Gtk.Label(label="Helpers"))
 
-        top.pack1(self._build_functions_panel(), resize=True, shrink=False)
-        top.pack2(self._build_caller_panel(), resize=True, shrink=False)
+    def _build_input_tab(self):
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        paned.set_position(420)
 
-        middle = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        middle.set_position(560)
-        top_and_middle.pack2(middle, resize=True, shrink=False)
+        caller_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        caller_box.set_border_width(8)
 
-        middle.pack1(self._build_original_panel(), resize=True, shrink=False)
-        middle.pack2(self._build_preview_panel(), resize=True, shrink=False)
+        caller_header = Gtk.Box(spacing=6)
+        caller_header.pack_start(self._label("Table Caller", step=True), True, True, 0)
 
-        bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        bottom.set_border_width(8)
-        bottom.pack_start(self._label("Generated Replacement Code"), False, False, 0)
-        generated_scroll, self.generated_view, self.generated_buf = self._text_view()
-        bottom.pack_start(generated_scroll, True, True, 0)
-        vertical.pack2(bottom, resize=True, shrink=False)
+        load_caller_btn = Gtk.Button(label="Load Example")
+        load_caller_btn.connect("clicked", self._load_example_caller)
+        caller_header.pack_end(load_caller_btn, False, False, 0)
 
-    def _build_functions_panel(self):
+        copy_caller_btn = Gtk.Button(label="Copy")
+        copy_caller_btn.connect("clicked", lambda _: self._copy_text(
+            self._get_text(self.caller_buf),
+            "caller copied."
+        ))
+        caller_header.pack_end(copy_caller_btn, False, False, 0)
+
+        caller_box.pack_start(caller_header, False, False, 0)
+        caller_box.pack_start(
+            self._label("Paste the Python block that contains columns = [...] and the print loop.", muted=True),
+            False, False, 0
+        )
+
+        caller_scroll, self.caller_view, self.caller_buf = self._text_view(editable=True)
+        self.caller_buf.connect("changed", self._on_text_changed)
+        caller_box.pack_start(caller_scroll, True, True, 0)
+
+        output_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        output_box.set_border_width(8)
+
+        output_header = Gtk.Box(spacing=6)
+        output_header.pack_start(self._label("Original Output", step=True), True, True, 0)
+
+        load_output_btn = Gtk.Button(label="Load Example")
+        load_output_btn.connect("clicked", self._load_example_original)
+        output_header.pack_end(load_output_btn, False, False, 0)
+
+        parse_rows_btn = Gtk.Button(label="Parse Rows")
+        parse_rows_btn.connect("clicked", self._parse_original_rows)
+        output_header.pack_end(parse_rows_btn, False, False, 0)
+
+        output_box.pack_start(output_header, False, False, 0)
+        output_box.pack_start(
+            self._label("Paste the terminal output for this table. This lets the preview use real rows.", muted=True),
+            False, False, 0
+        )
+
+        original_scroll, self.original_view, self.original_buf = self._text_view(editable=True)
+        self.original_buf.connect("changed", self._on_original_changed)
+        output_box.pack_start(original_scroll, True, True, 0)
+
+        paned.pack1(caller_box, resize=True, shrink=False)
+        paned.pack2(output_box, resize=True, shrink=False)
+        return paned
+
+    def _build_tune_tab(self):
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        paned.set_position(385)
+
+        editor_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        editor_box.set_border_width(8)
+
+        editor_box.pack_start(self._label("Column Editor", step=True), False, False, 0)
+        editor_box.pack_start(
+            self._label("Drag rows to reorder columns, or use Move Up / Move Down.", muted=True),
+            False, False, 0
+        )
+
+        control_grid = Gtk.Grid(column_spacing=6, row_spacing=6)
+        control_grid.set_margin_bottom(4)
+
+        add_btn = Gtk.Button(label="+ Column")
+        add_btn.connect("clicked", self._add_column)
+        control_grid.attach(add_btn, 0, 0, 1, 1)
+
+        remove_btn = Gtk.Button(label="Remove")
+        remove_btn.connect("clicked", self._remove_selected_column)
+        control_grid.attach(remove_btn, 1, 0, 1, 1)
+
+        up_btn = Gtk.Button(label="↑ Move")
+        up_btn.connect("clicked", lambda _: self._move_selected_column(-1))
+        control_grid.attach(up_btn, 2, 0, 1, 1)
+
+        down_btn = Gtk.Button(label="↓ Move")
+        down_btn.connect("clicked", lambda _: self._move_selected_column(1))
+        control_grid.attach(down_btn, 3, 0, 1, 1)
+
+        control_grid.attach(Gtk.Label(label="Width"), 0, 1, 1, 1)
+
+        self.width_spin = Gtk.SpinButton()
+        self.width_spin.set_range(1, 80)
+        self.width_spin.set_increments(1, 5)
+        self.width_spin.set_value(12)
+        self.width_spin.set_tooltip_text("Selected column width. Use arrows or scroll to adjust live.")
+        self.width_spin.connect("value-changed", self._on_width_spin_changed)
+        control_grid.attach(self.width_spin, 1, 1, 1, 1)
+
+        control_grid.attach(Gtk.Label(label="Align"), 2, 1, 1, 1)
+
+        prev_align_btn = Gtk.Button(label="‹")
+        prev_align_btn.set_tooltip_text("Previous alignment")
+        prev_align_btn.connect("clicked", lambda _: self._cycle_align(-1))
+        control_grid.attach(prev_align_btn, 3, 1, 1, 1)
+
+        self.align_combo = Gtk.ComboBoxText()
+        self.align_combo.append("<", "Left")
+        self.align_combo.append("^", "Centre")
+        self.align_combo.append(">", "Right")
+        self.align_combo.set_active_id("<")
+        self.align_combo.set_tooltip_text("Selected column alignment")
+        self.align_combo.connect("changed", self._on_align_changed)
+        control_grid.attach(self.align_combo, 4, 1, 1, 1)
+
+        next_align_btn = Gtk.Button(label="›")
+        next_align_btn.set_tooltip_text("Next alignment")
+        next_align_btn.connect("clicked", lambda _: self._cycle_align(1))
+        control_grid.attach(next_align_btn, 5, 1, 1, 1)
+
+        editor_box.pack_start(control_grid, False, False, 0)
+
+        preview_settings = Gtk.Box(spacing=8)
+
+        preview_settings.pack_start(Gtk.Label(label="Indent"), False, False, 0)
+        self.indent_spin = Gtk.SpinButton()
+        self.indent_spin.set_range(0, 12)
+        self.indent_spin.set_increments(1, 1)
+        self.indent_spin.set_value(3)
+        self.indent_spin.set_tooltip_text("Spaces before each table row.")
+        self.indent_spin.connect("value-changed", lambda _: self._preview_setting_changed())
+        preview_settings.pack_start(self.indent_spin, False, False, 0)
+
+        gap_lbl = Gtk.Label(label="Extra gap")
+        gap_lbl.set_tooltip_text(
+            "Extra gap means extra spaces inserted BETWEEN columns in the preview. "
+            "Use 0 if your format_column widths already create enough spacing."
+        )
+        preview_settings.pack_start(gap_lbl, False, False, 0)
+
+        self.gap_spin = Gtk.SpinButton()
+        self.gap_spin.set_range(0, 8)
+        self.gap_spin.set_increments(1, 1)
+        self.gap_spin.set_value(0)
+        self.gap_spin.set_tooltip_text(
+            "Extra spaces between columns in the preview. Usually keep this at 0."
+        )
+        self.gap_spin.connect("value-changed", lambda _: self._preview_setting_changed())
+        preview_settings.pack_start(self.gap_spin, False, False, 0)
+
+        preview_settings.pack_start(Gtk.Label(label="Separator"), False, False, 0)
+        self.separator_entry = Gtk.Entry()
+        self.separator_entry.set_width_chars(3)
+        self.separator_entry.set_text("-")
+        self.separator_entry.set_tooltip_text("Character used for the table separator line.")
+        self.separator_entry.connect("changed", lambda _: self._preview_setting_changed())
+        preview_settings.pack_start(self.separator_entry, False, False, 0)
+
+        editor_box.pack_start(preview_settings, False, False, 0)
+
+        self.column_store = Gtk.ListStore(str, int, str)
+        self.column_store.connect("row-changed", self._on_columns_changed)
+        self.column_store.connect("row-inserted", self._on_columns_changed)
+        self.column_store.connect("row-deleted", self._on_columns_changed)
+
+        self.column_tree = Gtk.TreeView(model=self.column_store)
+        self.column_tree.set_headers_visible(True)
+        self.column_tree.set_reorderable(True)
+        self.column_tree.set_tooltip_text("Drag rows up/down to reorder table columns.")
+
+        selection = self.column_tree.get_selection()
+        selection.connect("changed", self._on_column_selection_changed)
+
+        self._add_tree_column("Title", 0)
+        self._add_tree_column("Width", 1)
+        self._add_tree_column("Align", 2)
+
+        column_scroll = Gtk.ScrolledWindow()
+        column_scroll.add(self.column_tree)
+        editor_box.pack_start(column_scroll, True, True, 0)
+
+        preset_row = Gtk.Box(spacing=6)
+
+        compact_btn = Gtk.Button(label="Compact")
+        compact_btn.connect("clicked", lambda _: self._apply_preset("compact"))
+        preset_row.pack_start(compact_btn, False, False, 0)
+
+        readable_btn = Gtk.Button(label="Readable")
+        readable_btn.connect("clicked", lambda _: self._apply_preset("readable"))
+        preset_row.pack_start(readable_btn, False, False, 0)
+
+        wide_btn = Gtk.Button(label="Wide")
+        wide_btn.connect("clicked", lambda _: self._apply_preset("wide"))
+        preset_row.pack_start(wide_btn, False, False, 0)
+
+        editor_box.pack_start(preset_row, False, False, 0)
+
+        preview_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        preview_box.set_border_width(8)
+
+        preview_header = Gtk.Box(spacing=6)
+        preview_header.pack_start(self._label("Updated Preview", step=True), True, True, 0)
+
+        copy_preview_btn = Gtk.Button(label="Copy Preview")
+        copy_preview_btn.connect("clicked", lambda _: self._copy_text(
+            self._get_text(self.preview_buf),
+            "preview copied."
+        ))
+        preview_header.pack_end(copy_preview_btn, False, False, 0)
+
+        preview_box.pack_start(preview_header, False, False, 0)
+        preview_box.pack_start(
+            self._label("Adjust widths/alignment and this preview updates live.", muted=True),
+            False, False, 0
+        )
+
+        preview_scroll, self.preview_view, self.preview_buf = self._text_view(editable=False)
+        preview_box.pack_start(preview_scroll, True, True, 0)
+
+        paned.pack1(editor_box, resize=False, shrink=False)
+        paned.pack2(preview_box, resize=True, shrink=False)
+        return paned
+
+    def _build_code_tab(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_border_width(8)
 
-        row = Gtk.Box(spacing=6)
-        row.pack_start(self._label("Functions Library"), True, True, 0)
+        header = Gtk.Box(spacing=6)
+        header.pack_start(self._label("Generated Replacement Code", step=True), True, True, 0)
 
-        new_btn = Gtk.Button(label="New")
-        new_btn.connect("clicked", self._new_function)
-        row.pack_end(new_btn, False, False, 0)
+        generate_btn = Gtk.Button(label="Generate")
+        generate_btn.connect("clicked", self._generate_replacement_code)
+        header.pack_end(generate_btn, False, False, 0)
 
-        save_btn = Gtk.Button(label="Save")
-        save_btn.connect("clicked", self._save_function)
-        row.pack_end(save_btn, False, False, 0)
+        copy_btn = Gtk.Button(label="📋 Copy Generated Code")
+        copy_btn.connect("clicked", lambda _: self._copy_text(
+            self._get_text(self.generated_buf),
+            "Generated Replacement Code copied."
+        ))
+        header.pack_end(copy_btn, False, False, 0)
 
-        delete_btn = Gtk.Button(label="Delete")
-        delete_btn.connect("clicked", self._delete_function)
-        row.pack_end(delete_btn, False, False, 0)
+        box.pack_start(header, False, False, 0)
+        box.pack_start(
+            self._label("Paste this back into SentinelIR to replace the original table caller block.", muted=True),
+            False, False, 0
+        )
 
-        box.pack_start(row, False, False, 0)
+        generated_scroll, self.generated_view, self.generated_buf = self._text_view(editable=True, wrap=False)
+        self.generated_buf.connect("changed", self._on_text_changed)
+        box.pack_start(generated_scroll, True, True, 0)
+        return box
 
-        split = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        split.set_position(190)
+    def _build_helpers_tab(self):
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        paned.set_position(230)
 
-        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        left.set_border_width(8)
+
+        left.pack_start(self._label("Table Helpers", step=True), False, False, 0)
 
         self.function_list = Gtk.ListBox()
         self.function_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.function_list.connect("row-selected", self._on_function_selected)
 
-        list_scroll = Gtk.ScrolledWindow()
-        list_scroll.set_min_content_width(160)
-        list_scroll.add(self.function_list)
-        left.pack_start(list_scroll, True, True, 0)
+        function_list_scroll = Gtk.ScrolledWindow()
+        function_list_scroll.add(self.function_list)
+        left.pack_start(function_list_scroll, True, True, 0)
 
-        example_btn = Gtk.Button(label="Load Example")
-        example_btn.connect("clicked", self._load_example_functions)
-        left.pack_start(example_btn, False, False, 0)
+        helper_btn_row = Gtk.Box(spacing=6)
 
-        split.pack1(left, resize=False, shrink=False)
+        new_btn = Gtk.Button(label="New")
+        new_btn.connect("clicked", self._new_function)
+        helper_btn_row.pack_start(new_btn, True, True, 0)
 
-        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        delete_btn = Gtk.Button(label="Delete")
+        delete_btn.connect("clicked", self._delete_function)
+        helper_btn_row.pack_start(delete_btn, True, True, 0)
+
+        left.pack_start(helper_btn_row, False, False, 0)
+
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        right.set_border_width(8)
+
+        right.pack_start(self._label("Helper Snippet", step=True), False, False, 0)
 
         self.function_name_entry = Gtk.Entry()
-        self.function_name_entry.set_placeholder_text("Function snippet name")
+        self.function_name_entry.set_placeholder_text("Table Helpers")
         right.pack_start(self.function_name_entry, False, False, 0)
 
-        function_scroll, self.function_view, self.function_buf = self._text_view()
+        function_scroll, self.function_view, self.function_buf = self._text_view(editable=True)
         right.pack_start(function_scroll, True, True, 0)
 
-        copy_btn = Gtk.Button(label="📋 Copy Functions")
+        function_btn_row = Gtk.Box(spacing=6)
+
+        save_btn = Gtk.Button(label="Save Helpers")
+        save_btn.connect("clicked", self._save_function)
+        function_btn_row.pack_start(save_btn, False, False, 0)
+
+        copy_btn = Gtk.Button(label="Copy Helpers")
         copy_btn.connect("clicked", lambda _: self._copy_text(
             self._get_text(self.function_buf),
-            "functions copied."
+            "helpers copied."
         ))
-        right.pack_start(copy_btn, False, False, 0)
+        function_btn_row.pack_start(copy_btn, False, False, 0)
 
-        split.pack2(right, resize=True, shrink=False)
+        load_btn = Gtk.Button(label="Load Default")
+        load_btn.connect("clicked", self._load_default_helpers)
+        function_btn_row.pack_end(load_btn, False, False, 0)
 
-        box.pack_start(split, True, True, 0)
-        return box
+        right.pack_start(function_btn_row, False, False, 0)
 
-    def _build_caller_panel(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_border_width(8)
+        paned.pack1(left, resize=False, shrink=False)
+        paned.pack2(right, resize=True, shrink=False)
+        return paned
 
-        row = Gtk.Box(spacing=6)
-        row.pack_start(self._label("Table Caller"), True, True, 0)
-
-        load_btn = Gtk.Button(label="Load Example")
-        load_btn.connect("clicked", self._load_example_caller)
-        row.pack_end(load_btn, False, False, 0)
-
-        copy_btn = Gtk.Button(label="Copy")
-        copy_btn.connect("clicked", lambda _: self._copy_text(
-            self._get_text(self.caller_buf),
-            "caller copied."
-        ))
-        row.pack_end(copy_btn, False, False, 0)
-
-        box.pack_start(row, False, False, 0)
-
-        caller_scroll, self.caller_view, self.caller_buf = self._text_view()
-        box.pack_start(caller_scroll, True, True, 0)
-        return box
-
-    def _build_original_panel(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_border_width(8)
-
-        row = Gtk.Box(spacing=6)
-        row.pack_start(self._label("Original Output"), True, True, 0)
-
-        load_btn = Gtk.Button(label="Load Example")
-        load_btn.connect("clicked", self._load_example_original)
-        row.pack_end(load_btn, False, False, 0)
-
-        parse_btn = Gtk.Button(label="Parse Rows")
-        parse_btn.connect("clicked", self._parse_original_rows)
-        row.pack_end(parse_btn, False, False, 0)
-
-        box.pack_start(row, False, False, 0)
-
-        original_scroll, self.original_view, self.original_buf = self._text_view(editable=True)
-        box.pack_start(original_scroll, True, True, 0)
-        return box
-
-    def _build_preview_panel(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_border_width(8)
-
-        box.pack_start(self._label("Updated Preview"), False, False, 0)
-
-        controls = Gtk.Grid(column_spacing=8, row_spacing=4)
-        controls.set_margin_bottom(4)
-
-        controls.attach(Gtk.Label(label="Indent"), 0, 0, 1, 1)
-        self.indent_spin = Gtk.SpinButton()
-        self.indent_spin.set_range(0, 12)
-        self.indent_spin.set_increments(1, 1)
-        self.indent_spin.set_value(3)
-        self.indent_spin.connect("value-changed", lambda _: self._build_preview())
-        controls.attach(self.indent_spin, 1, 0, 1, 1)
-
-        controls.attach(Gtk.Label(label="Column gap"), 2, 0, 1, 1)
-        self.gap_spin = Gtk.SpinButton()
-        self.gap_spin.set_range(0, 8)
-        self.gap_spin.set_increments(1, 1)
-        self.gap_spin.set_value(0)
-        self.gap_spin.connect("value-changed", lambda _: self._build_preview())
-        controls.attach(self.gap_spin, 3, 0, 1, 1)
-
-        controls.attach(Gtk.Label(label="Separator"), 4, 0, 1, 1)
-        self.separator_entry = Gtk.Entry()
-        self.separator_entry.set_width_chars(3)
-        self.separator_entry.set_text("-")
-        self.separator_entry.connect("changed", lambda _: self._build_preview())
-        controls.attach(self.separator_entry, 5, 0, 1, 1)
-
-        compact_btn = Gtk.Button(label="Compact")
-        compact_btn.connect("clicked", lambda _: self._apply_preset("compact"))
-        controls.attach(compact_btn, 6, 0, 1, 1)
-
-        readable_btn = Gtk.Button(label="Readable")
-        readable_btn.connect("clicked", lambda _: self._apply_preset("readable"))
-        controls.attach(readable_btn, 7, 0, 1, 1)
-
-        wide_btn = Gtk.Button(label="Wide")
-        wide_btn.connect("clicked", lambda _: self._apply_preset("wide"))
-        controls.attach(wide_btn, 8, 0, 1, 1)
-
-        box.pack_start(controls, False, False, 0)
-
-        column_row = Gtk.Box(spacing=6)
-        column_row.pack_start(self._label("Column Editor", muted=True), True, True, 0)
-
-        add_btn = Gtk.Button(label="+ Column")
-        add_btn.connect("clicked", self._add_column)
-        column_row.pack_end(add_btn, False, False, 0)
-
-        remove_btn = Gtk.Button(label="Remove")
-        remove_btn.connect("clicked", self._remove_selected_column)
-        column_row.pack_end(remove_btn, False, False, 0)
-
-        box.pack_start(column_row, False, False, 0)
-
-        self.column_store = Gtk.ListStore(str, int, str)
-        self.column_tree = Gtk.TreeView(model=self.column_store)
-        self.column_tree.set_headers_visible(True)
-
-        self._add_text_column("Title", 0)
-        self._add_text_column("Width", 1)
-        self._add_text_column("Align (< ^ >)", 2)
-
-        column_scroll = Gtk.ScrolledWindow()
-        column_scroll.set_min_content_height(110)
-        column_scroll.add(self.column_tree)
-        box.pack_start(column_scroll, False, False, 0)
-
-        preview_scroll, self.preview_view, self.preview_buf = self._text_view(editable=False)
-        box.pack_start(preview_scroll, True, True, 0)
-        return box
-
-    def _add_text_column(self, title, index):
+    def _add_tree_column(self, title, model_index):
         renderer = Gtk.CellRendererText()
         renderer.set_property("editable", True)
-        renderer.connect("edited", self._on_column_edited, index)
+        renderer.connect("edited", self._on_tree_cell_edited, model_index)
 
-        column = Gtk.TreeViewColumn(title, renderer, text=index)
+        column = Gtk.TreeViewColumn(title, renderer, text=model_index)
         column.set_resizable(True)
         column.set_expand(True)
         self.column_tree.append_column(column)
 
-    # ── Function library ────────────────────────────────────────────────────
+    # ── Dirty/session save ──────────────────────────────────────────────────
+
+    def _on_text_changed(self, *_):
+        if self._loading or self._programmatic:
+            return
+
+        self._mark_dirty()
+
+    def _on_original_changed(self, *_):
+        if self._loading or self._programmatic:
+            return
+
+        self.parsed_rows = []
+        self.prefix_lines = []
+        self._mark_dirty()
+
+    def _mark_dirty(self):
+        if self._loading:
+            return
+
+        self._dirty = True
+        self._update_dirty_label()
+
+        if hasattr(self, "autosave_switch") and self.autosave_switch.get_active():
+            self._schedule_autosave()
+
+    def _update_dirty_label(self):
+        if not hasattr(self, "dirty_lbl"):
+            return
+
+        ctx = self.dirty_lbl.get_style_context()
+        ctx.remove_class("lab-unsaved")
+        ctx.remove_class("lab-saved")
+
+        if self._dirty:
+            self.dirty_lbl.set_text("Unsaved")
+            ctx.add_class("lab-unsaved")
+        else:
+            self.dirty_lbl.set_text("Saved")
+            ctx.add_class("lab-saved")
+
+    def _on_autosave_toggled(self, *_):
+        if self.autosave_switch.get_active() and self._dirty:
+            self._schedule_autosave()
+
+    def _schedule_autosave(self):
+        if self._autosave_timeout:
+            GLib.source_remove(self._autosave_timeout)
+
+        self._autosave_timeout = GLib.timeout_add(900, self._do_autosave)
+
+    def _do_autosave(self):
+        self._autosave_timeout = None
+
+        if self._dirty and self.autosave_switch.get_active():
+            self._save_session(silent=True)
+
+        return False
+
+    def _collect_payload(self):
+        return {
+            "caller": self._get_text(self.caller_buf),
+            "original": self._get_text(self.original_buf),
+            "generated": self._get_text(self.generated_buf),
+            "columns": [
+                [str(row[0]), int(row[1]), str(row[2])]
+                for row in self.column_store
+            ],
+            "indent": int(self.indent_spin.get_value()),
+            "gap": int(self.gap_spin.get_value()),
+            "separator": self.separator_entry.get_text() or "-",
+            "parsed_rows": self.parsed_rows,
+            "prefix_lines": self.prefix_lines,
+        }
+
+    def _apply_payload(self, payload):
+        payload = payload or {}
+        self._loading = True
+
+        self._set_text(self.caller_buf, payload.get("caller", ""))
+        self._set_text(self.original_buf, payload.get("original", ""))
+        self._set_text(self.generated_buf, payload.get("generated", ""))
+
+        self.column_store.clear()
+        for col in payload.get("columns", []):
+            try:
+                title, width, align = col
+                self.column_store.append([str(title), int(width), str(align)])
+            except Exception:
+                pass
+
+        self.indent_spin.set_value(int(payload.get("indent", 3)))
+        self.gap_spin.set_value(int(payload.get("gap", 0)))
+        self.separator_entry.set_text(payload.get("separator", "-"))
+
+        self.parsed_rows = payload.get("parsed_rows", [])
+        self.prefix_lines = payload.get("prefix_lines", [])
+
+        self._loading = False
+        self._build_preview()
+        self._dirty = False
+        self._update_dirty_label()
+        self._update_column_controls()
+
+    def _save_session(self, _=None, silent=False):
+        name = self.session_name_entry.get_text().strip() or "Untitled Table Session"
+
+        session = table_lab.save_session(
+            self.current_session_id,
+            name,
+            self._collect_payload()
+        )
+
+        self.current_session_id = session.get("id")
+        self._dirty = False
+        self._update_dirty_label()
+        self._refresh_session_combo(select_id=self.current_session_id)
+
+        if not silent:
+            self.status_lbl.set_text("✅ Session saved.")
+
+    def _new_session(self, _=None):
+        if self._dirty and not self.autosave_switch.get_active():
+            response = self._save_discard_cancel("Save current session before starting a new one?")
+
+            if response == "cancel":
+                return
+
+            if response == "save":
+                self._save_session()
+
+        self.current_session_id = None
+        self.session_name_entry.set_text("")
+        self._apply_payload({})
+        self.status_lbl.set_text("New Table Lab session.")
+        self.notebook.set_current_page(0)
+
+    def _refresh_session_combo(self, select_id=None):
+        if not hasattr(self, "recent_combo"):
+            return
+
+        self._loading = True
+        self.recent_combo.remove_all()
+        self.recent_combo.append("_none", "Recent sessions")
+
+        active_index = 0
+
+        for index, session in enumerate(table_lab.list_sessions(), start=1):
+            sid = session.get("id")
+            name = session.get("name", "Untitled Table Session")
+            self.recent_combo.append(sid, name)
+
+            if sid == select_id:
+                active_index = index
+
+        self.recent_combo.set_active(active_index)
+        self._loading = False
+
+    def _on_recent_session_changed(self, combo):
+        if self._loading:
+            return
+
+        session_id = combo.get_active_id()
+
+        if not session_id or session_id == "_none":
+            return
+
+        if self._dirty and not self.autosave_switch.get_active():
+            response = self._save_discard_cancel("Save current session before loading another one?")
+
+            if response == "cancel":
+                self._refresh_session_combo(select_id=self.current_session_id)
+                return
+
+            if response == "save":
+                self._save_session()
+
+        session = table_lab.get_session(session_id)
+
+        if not session:
+            return
+
+        self.current_session_id = session_id
+        self.session_name_entry.set_text(session.get("name", "Untitled Table Session"))
+        self._apply_payload(session.get("payload", {}))
+        self.status_lbl.set_text(f"Loaded: {session.get('name', 'session')}")
+
+    # ── Helper snippets ─────────────────────────────────────────────────────
 
     def _refresh_function_list(self):
         for child in self.function_list.get_children():
@@ -483,7 +917,7 @@ class TableLabWindow(Gtk.Window):
             row.function_id = item.get("id")
             row.function_data = item
 
-            label = Gtk.Label(label=item.get("name", "Untitled Functions"))
+            label = Gtk.Label(label=item.get("name", "Table Helpers"))
             label.set_halign(Gtk.Align.START)
             label.set_ellipsize(Pango.EllipsizeMode.END)
             label.set_margin_top(5)
@@ -496,33 +930,38 @@ class TableLabWindow(Gtk.Window):
 
         self.function_list.show_all()
 
+    def _load_first_function(self):
+        row = self.function_list.get_row_at_index(0)
+
+        if row is not None:
+            self.function_list.select_row(row)
+
     def _on_function_selected(self, _listbox, row):
         if row is None or not hasattr(row, "function_data"):
             return
 
         data = row.function_data
         self.selected_function_id = data.get("id")
-        self.function_name_entry.set_text(data.get("name", ""))
+        self.function_name_entry.set_text(data.get("name", "Table Helpers"))
         self._set_text(self.function_buf, data.get("code", ""))
 
     def _new_function(self, _=None):
         self.selected_function_id = None
         self.function_name_entry.set_text("")
         self._set_text(self.function_buf, "")
-        self.status_lbl.set_text("New function snippet ready.")
 
     def _save_function(self, _=None):
-        name = self.function_name_entry.get_text().strip() or "Untitled Functions"
+        name = self.function_name_entry.get_text().strip() or "Table Helpers"
         code = self._get_text(self.function_buf)
 
         if self.selected_function_id:
             item = table_lab.update_function(self.selected_function_id, name, code)
         else:
             item = table_lab.add_function(name, code)
-            self.selected_function_id = item.get("id")
 
+        self.selected_function_id = item.get("id")
         self._refresh_function_list()
-        self.status_lbl.set_text("✅ Function snippet saved.")
+        self.status_lbl.set_text("✅ Table helpers saved.")
 
     def _delete_function(self, _=None):
         if not self.selected_function_id:
@@ -530,53 +969,149 @@ class TableLabWindow(Gtk.Window):
 
         table_lab.remove_function(self.selected_function_id)
         self.selected_function_id = None
-        self.function_name_entry.set_text("")
-        self._set_text(self.function_buf, "")
         self._refresh_function_list()
-        self.status_lbl.set_text("Deleted function snippet.")
+        self._load_first_function()
+        self.status_lbl.set_text("Table helpers deleted.")
+
+    def _load_default_helpers(self, _=None):
+        self.function_name_entry.set_text("Table Helpers")
+        self._set_text(self.function_buf, table_lab.DEFAULT_FUNCTIONS)
+        self.status_lbl.set_text("Default Table Helpers loaded.")
 
     # ── Examples ────────────────────────────────────────────────────────────
 
-    def _load_example_functions(self, _=None):
-        self.function_name_entry.set_text("SentinelIR table helpers")
-        self._set_text(self.function_buf, table_lab.DEFAULT_FUNCTIONS)
-        self.status_lbl.set_text("Loaded helper function example.")
-
     def _load_example_caller(self, _=None):
-        self._set_text(self.caller_buf, EXAMPLE_CALLER)
+        self._set_text(self.caller_buf, EXAMPLE_CALLER, mark=True)
         self._parse_columns_from_caller()
 
     def _load_example_original(self, _=None):
-        self._set_text(self.original_buf, EXAMPLE_OUTPUT)
+        self._set_text(self.original_buf, EXAMPLE_OUTPUT, mark=True)
         self._parse_original_rows()
 
-    # ── Column editor ───────────────────────────────────────────────────────
+    # ── Columns ─────────────────────────────────────────────────────────────
 
-    def _on_column_edited(self, _renderer, path, new_text, index):
+    def _selected_column_iter(self):
+        selection = self.column_tree.get_selection()
+        model, tree_iter = selection.get_selected()
+        return model, tree_iter
+
+    def _update_column_controls(self):
+        if not hasattr(self, "width_spin"):
+            return
+
+        model, tree_iter = self._selected_column_iter()
+        has_selection = tree_iter is not None
+
+        self._syncing_column_controls = True
+        self.width_spin.set_sensitive(has_selection)
+        self.align_combo.set_sensitive(has_selection)
+
+        if has_selection:
+            self.width_spin.set_value(int(model[tree_iter][1]))
+            align = str(model[tree_iter][2])
+            self.align_combo.set_active_id(align if align in ("<", "^", ">") else "<")
+
+        self._syncing_column_controls = False
+
+    def _on_column_selection_changed(self, *_):
+        self._update_column_controls()
+
+    def _on_width_spin_changed(self, spin):
+        if self._syncing_column_controls:
+            return
+
+        model, tree_iter = self._selected_column_iter()
+
+        if tree_iter is None:
+            return
+
+        model[tree_iter][1] = int(spin.get_value())
+        self._build_preview()
+        self._mark_dirty()
+
+    def _on_align_changed(self, combo):
+        if self._syncing_column_controls:
+            return
+
+        model, tree_iter = self._selected_column_iter()
+
+        if tree_iter is None:
+            return
+
+        align = combo.get_active_id() or "<"
+        model[tree_iter][2] = align
+        self._build_preview()
+        self._mark_dirty()
+
+    def _cycle_align(self, direction):
+        order = ["<", "^", ">"]
+        current = self.align_combo.get_active_id() or "<"
+
         try:
-            if index == 1:
-                self.column_store[path][index] = max(1, int(new_text.strip()))
-            elif index == 2:
-                val = new_text.strip()
-                self.column_store[path][index] = val if val in ("<", "^", ">") else "<"
+            index = order.index(current)
+        except ValueError:
+            index = 0
+
+        self.align_combo.set_active_id(order[(index + direction) % len(order)])
+
+    def _on_tree_cell_edited(self, _renderer, path, new_text, model_index):
+        try:
+            if model_index == 1:
+                self.column_store[path][model_index] = max(1, int(new_text.strip()))
+            elif model_index == 2:
+                align = new_text.strip()
+                self.column_store[path][model_index] = align if align in ("<", "^", ">") else "<"
             else:
-                self.column_store[path][index] = new_text
+                self.column_store[path][model_index] = new_text.strip() or "Column"
         except Exception:
             return
 
+        self._update_column_controls()
         self._build_preview()
+        self._mark_dirty()
+
+    def _on_columns_changed(self, *_):
+        if self._loading:
+            return
+
+        self._build_preview()
+        self._mark_dirty()
 
     def _add_column(self, _=None, title="New Column", width=12, align="<"):
         self.column_store.append([title, int(width), align])
         self._build_preview()
+        self._mark_dirty()
 
     def _remove_selected_column(self, _=None):
-        selection = self.column_tree.get_selection()
-        model, tree_iter = selection.get_selected()
+        model, tree_iter = self._selected_column_iter()
 
-        if tree_iter is not None:
-            model.remove(tree_iter)
-            self._build_preview()
+        if tree_iter is None:
+            return
+
+        model.remove(tree_iter)
+        self._build_preview()
+        self._mark_dirty()
+        self._update_column_controls()
+
+    def _move_selected_column(self, direction):
+        model, tree_iter = self._selected_column_iter()
+
+        if tree_iter is None:
+            return
+
+        path = model.get_path(tree_iter)
+        index = path.get_indices()[0]
+        new_index = index + direction
+
+        if new_index < 0 or new_index >= len(model):
+            return
+
+        other_iter = model.get_iter(Gtk.TreePath.new_from_string(str(new_index)))
+        model.swap(tree_iter, other_iter)
+
+        self.column_tree.get_selection().select_path(Gtk.TreePath.new_from_string(str(new_index)))
+        self._build_preview()
+        self._mark_dirty()
 
     def _read_columns(self):
         columns = []
@@ -594,6 +1129,7 @@ class TableLabWindow(Gtk.Window):
         return columns
 
     def _set_columns(self, columns):
+        self._loading = True
         self.column_store.clear()
 
         for col in columns:
@@ -604,6 +1140,15 @@ class TableLabWindow(Gtk.Window):
                 align = "<"
 
             self.column_store.append([str(title), int(width), align])
+
+        self._loading = False
+
+        first = self.column_store.get_iter_first()
+        if first is not None:
+            self.column_tree.get_selection().select_iter(first)
+
+        self._build_preview()
+        self._mark_dirty()
 
     def _apply_preset(self, mode):
         columns = self._read_columns()
@@ -624,9 +1169,21 @@ class TableLabWindow(Gtk.Window):
             adjusted.append((title, width, align))
 
         self._set_columns(adjusted)
+
+    def _preview_setting_changed(self):
+        if self._loading:
+            return
+
         self._build_preview()
+        self._mark_dirty()
 
     # ── Parsing ─────────────────────────────────────────────────────────────
+
+    def _parse_everything(self, _=None):
+        self._parse_columns_from_caller()
+        self._parse_original_rows()
+        self._build_preview()
+        self._generate_replacement_code()
 
     def _parse_columns_from_caller(self, _=None):
         caller = self._get_text(self.caller_buf)
@@ -639,6 +1196,7 @@ class TableLabWindow(Gtk.Window):
 
             try:
                 parsed = ast.literal_eval(raw)
+
                 for item in parsed:
                     if isinstance(item, tuple) and len(item) in (2, 3):
                         title = str(item[0])
@@ -657,14 +1215,11 @@ class TableLabWindow(Gtk.Window):
                 columns.append((title, int(width), align or "<"))
 
         if not columns:
-            self._info("No columns found. Add columns manually or paste a caller with columns = [...].")
+            self._show_info("No columns found. Paste a caller containing columns = [...] or add columns manually.")
             return
 
         self._set_columns(columns)
-        self.status_lbl.set_text(f"✅ Parsed {len(columns)} column(s) from caller.")
-        self._parse_original_rows()
-        self._build_preview()
-        self._generate_replacement_code()
+        self.status_lbl.set_text(f"✅ Parsed {len(columns)} column(s).")
 
     def _parse_original_rows(self, _=None):
         original = strip_ansi(self._get_text(self.original_buf)).replace("\t", "    ")
@@ -674,27 +1229,28 @@ class TableLabWindow(Gtk.Window):
         self.parsed_rows = []
 
         if not original.strip() or not columns:
+            self.status_lbl.set_text("Paste Original Output and parse columns first.")
             return
 
         lines = original.splitlines()
-        sep_index = None
+        separator_index = None
 
-        for i, line in enumerate(lines):
+        for index, line in enumerate(lines):
             if re.match(r"^\s*-{5,}\s*$", line):
-                sep_index = i
+                separator_index = index
                 break
 
-        if sep_index is None:
-            self.status_lbl.set_text("Could not find separator line in original output.")
+        if separator_index is None:
+            self.status_lbl.set_text("Could not find a separator line like ----- in Original Output.")
             return
 
-        header_index = max(0, sep_index - 1)
+        header_index = max(0, separator_index - 1)
         self.prefix_lines = lines[:header_index]
 
         indent = int(self.indent_spin.get_value())
         gap = int(self.gap_spin.get_value())
 
-        for raw in lines[sep_index + 1:]:
+        for raw in lines[separator_index + 1:]:
             if not raw.strip():
                 continue
 
@@ -709,15 +1265,17 @@ class TableLabWindow(Gtk.Window):
             if any(values):
                 self.parsed_rows.append(values)
 
-        self.status_lbl.set_text(f"Parsed {len(self.parsed_rows)} row(s) from original output.")
+        self.status_lbl.set_text(f"✅ Parsed {len(self.parsed_rows)} row(s).")
+        self._build_preview()
+        self._mark_dirty()
 
-    # ── Preview / code generation ───────────────────────────────────────────
+    # ── Preview / generated code ────────────────────────────────────────────
 
     def _render_table(self):
         columns = self._read_columns()
 
         if not columns:
-            return "No columns yet. Paste a caller and click Parse Caller Columns, or add columns manually."
+            return "No columns yet. Paste a Table Caller and click 1 Parse, or add columns manually."
 
         indent = " " * int(self.indent_spin.get_value())
         gap = " " * int(self.gap_spin.get_value())
@@ -744,24 +1302,24 @@ class TableLabWindow(Gtk.Window):
         rows = self.parsed_rows
 
         if not rows:
-            rows = [[title for title, _width, _align in columns]]
+            rows = [["example" for _ in columns]]
 
         for row in rows:
             padded = []
-            for i, (_title, _width, _align) in enumerate(columns):
-                padded.append(row[i] if i < len(row) else "")
+
+            for index, _column in enumerate(columns):
+                padded.append(row[index] if index < len(row) else "")
 
             lines.append(
                 indent + gap.join(
-                    format_cell(value, columns[i][1], columns[i][2])
-                    for i, value in enumerate(padded)
+                    format_cell(value, columns[index][1], columns[index][2])
+                    for index, value in enumerate(padded)
                 )
             )
 
         return "\n".join(lines)
 
     def _build_preview(self, _=None):
-        self._parse_original_rows()
         preview = self._render_table()
         self._set_text(self.preview_buf, preview)
 
@@ -806,17 +1364,17 @@ class TableLabWindow(Gtk.Window):
         index = {"value": 0}
 
         def repl(match):
-            col = columns[index["value"] % len(columns)]
+            column = columns[index["value"] % len(columns)]
             index["value"] += 1
 
-            expr = match.group(1).strip()
-            width = col[1]
-            align = col[2]
+            expression = match.group(1).strip()
+            width = column[1]
+            align = column[2]
 
             if align == "<":
-                return f"format_column({expr}, {width})"
+                return f"format_column({expression}, {width})"
 
-            return f'format_column({expr}, {width}, "{align}")'
+            return f'format_column({expression}, {width}, "{align}")'
 
         return pattern.sub(repl, caller)
 
@@ -830,4 +1388,23 @@ class TableLabWindow(Gtk.Window):
             generated = self._replace_format_column_widths(generated)
 
         self._set_text(self.generated_buf, generated)
+        self.notebook.set_current_page(2)
         self.status_lbl.set_text("✅ Replacement code generated.")
+        self._mark_dirty()
+
+    # ── Help ────────────────────────────────────────────────────────────────
+
+    def _show_help(self, _=None):
+        self._show_info(
+            "Best workflow:\n\n"
+            "1. Paste the SentinelIR table caller code into Table Caller.\n"
+            "2. Paste the old terminal output into Original Output.\n"
+            "3. Click 1 Parse.\n"
+            "4. Go to 2 Tune and adjust widths/alignment.\n"
+            "5. Drag columns to reorder them.\n"
+            "6. Click 3 Generate Code.\n"
+            "7. Copy Generated Code and paste it back into SentinelIR.\n\n"
+            "Extra gap = extra spaces inserted between preview columns. "
+            "Usually keep it at 0 unless the table looks too cramped.",
+            title="How to use Table Lab"
+        )

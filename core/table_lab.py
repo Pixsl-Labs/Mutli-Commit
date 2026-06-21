@@ -1,6 +1,6 @@
 """Table Lab storage for Multi-Commit.
 
-Stores reusable table helper/function snippets in:
+Stores reusable table helper snippets and recent Table Lab sessions in:
 ~/.config/multi-commit/table_lab.json
 """
 import json
@@ -57,12 +57,13 @@ def _default_data():
         "functions": [
             {
                 "id": str(uuid.uuid4()),
-                "name": "SentinelIR table helpers",
+                "name": "Table Helpers",
                 "code": DEFAULT_FUNCTIONS,
                 "created": _now(),
                 "updated": _now(),
             }
-        ]
+        ],
+        "sessions": [],
     }
 
 
@@ -84,6 +85,16 @@ def load():
         data = _default_data()
 
     data.setdefault("functions", [])
+    data.setdefault("sessions", [])
+
+    if not data["functions"]:
+        data["functions"].append(_default_data()["functions"][0])
+
+    for item in data.get("functions", []):
+        if item.get("name") == "SentinelIR table helpers":
+            item["name"] = "Table Helpers"
+
+    save(data)
     return data
 
 
@@ -93,6 +104,8 @@ def save(data):
         json.dump(data, f, indent=2)
 
 
+# ── Helpers / function snippets ─────────────────────────────────────────────
+
 def list_functions():
     return load().get("functions", [])
 
@@ -101,7 +114,7 @@ def add_function(name, code):
     data = load()
     item = {
         "id": str(uuid.uuid4()),
-        "name": name.strip() or "Untitled Functions",
+        "name": name.strip() or "Table Helpers",
         "code": code,
         "created": _now(),
         "updated": _now(),
@@ -116,7 +129,7 @@ def update_function(function_id, name, code):
 
     for item in data.get("functions", []):
         if item.get("id") == function_id:
-            item["name"] = name.strip() or item.get("name", "Untitled Functions")
+            item["name"] = name.strip() or item.get("name", "Table Helpers")
             item["code"] = code
             item["updated"] = _now()
             save(data)
@@ -130,5 +143,64 @@ def remove_function(function_id):
     data["functions"] = [
         item for item in data.get("functions", [])
         if item.get("id") != function_id
+    ]
+
+    if not data["functions"]:
+        data["functions"].append(_default_data()["functions"][0])
+
+    save(data)
+
+
+# ── Recent Table Lab sessions ───────────────────────────────────────────────
+
+def list_sessions(limit=12):
+    sessions = load().get("sessions", [])
+    sessions = sorted(
+        sessions,
+        key=lambda item: item.get("updated", ""),
+        reverse=True,
+    )
+    return sessions[:limit]
+
+
+def get_session(session_id):
+    for session in load().get("sessions", []):
+        if session.get("id") == session_id:
+            return session
+    return None
+
+
+def save_session(session_id, name, payload):
+    data = load()
+    sessions = data.setdefault("sessions", [])
+    name = name.strip() or "Untitled Table Session"
+
+    for session in sessions:
+        if session.get("id") == session_id:
+            session["name"] = name
+            session["payload"] = payload or {}
+            session["updated"] = _now()
+            save(data)
+            return session
+
+    session = {
+        "id": str(uuid.uuid4()),
+        "name": name,
+        "payload": payload or {},
+        "created": _now(),
+        "updated": _now(),
+    }
+
+    sessions.insert(0, session)
+    data["sessions"] = sessions[:20]
+    save(data)
+    return session
+
+
+def delete_session(session_id):
+    data = load()
+    data["sessions"] = [
+        item for item in data.get("sessions", [])
+        if item.get("id") != session_id
     ]
     save(data)
