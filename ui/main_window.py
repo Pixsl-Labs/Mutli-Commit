@@ -93,7 +93,7 @@ class MainWindow(Gtk.Window):
         self.connect("delete-event", self._on_main_delete_event)
 
         GLib.timeout_add(1200, self._startup_update_check)
-        GLib.timeout_add_seconds(3, self._realtime_update_check)
+        GLib.timeout_add_seconds(10, self._realtime_update_check)
 
     def _save_main_pane_positions(self, *_):
         """Remember main splitter positions between launches."""
@@ -357,40 +357,40 @@ class MainWindow(Gtk.Window):
 
     def _realtime_update_check(self):
         """
-        Poll for real/test updates while Multi-Commit is already open.
+        Lightweight live watcher.
 
-        This lets a fake update be created from another terminal and the popup
-        appears without restarting the app.
+        Only checks the local test update file so the popup can appear while
+        the app is open. It does NOT run git fetch / remote update checks.
         """
         try:
-            info = update_manager.check_for_update()
-            if not info.get("available"):
+            if not hasattr(update_manager, "live_update_info"):
                 return True
 
-            update_id = (
-                info.get("id")
-                or f"{info.get('latest', 'remote')}-{info.get('behind', 0)}"
-            )
+            info = update_manager.live_update_info()
 
-            if update_id == self._last_update_popup_id:
+            if not info or not info.get("available"):
+                return True
+
+            update_id = info.get("id") or f"{info.get('latest', 'test')}-{info.get('behind', 0)}"
+
+            if update_id == getattr(self, "_last_update_popup_id", None):
                 return True
 
             self._last_update_popup_id = update_id
             self._show_update_prompt(info)
 
             try:
-                self.statusbar.push(0, "🔄 Update available: " + info.get("message", ""))
+                self.statusbar.push(0, "🔄 Test update available: " + info.get("message", ""))
             except Exception:
                 pass
 
         except Exception as e:
             try:
-                self.statusbar.push(0, f"Update watcher skipped: {e}")
+                self.statusbar.push(0, f"Live update watcher skipped: {e}")
             except Exception:
                 pass
 
         return True
-
 
     def _create_test_update_popup(self, _=None):
         info = update_manager.create_test_update(
@@ -415,15 +415,27 @@ class MainWindow(Gtk.Window):
             pass
 
     def _startup_update_check(self):
+        """
+        Startup check is now cheap.
+
+        Do not run remote git fetch automatically on app open because it can
+        freeze/lag the GTK UI. Manual update checks still do the full check.
+        """
         try:
-            info = update_manager.check_for_update()
-            if info.get("available"):
+            info = None
+
+            if hasattr(update_manager, "live_update_info"):
+                info = update_manager.live_update_info()
+
+            if info and info.get("available"):
                 self._show_update_prompt(info)
+
         except Exception as e:
             try:
-                self.statusbar.push(0, f"Update check skipped: {e}")
+                self.statusbar.push(0, f"Startup update check skipped: {e}")
             except Exception:
                 pass
+
         return False
 
     def _manual_update_check(self, _=None):

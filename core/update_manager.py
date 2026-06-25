@@ -383,3 +383,21 @@ def apply_update():
 
     return _mc_original_apply_update()
 
+
+# ── Multi-Commit performance update watcher patch ───────────────────────────
+def live_update_info():
+    """
+    Lightweight live update check for the open app.
+
+    IMPORTANT:
+    This must never run git fetch / network commands.
+    It only checks the local test-update file used for realtime popup testing.
+    Manual Update Center checks still use the full remote updater.
+    """
+    tester = globals().get("test_update_info")
+
+    if callable(tester):
+        return tester()
+
+    return None
+
