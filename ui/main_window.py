@@ -11,7 +11,7 @@ from ui.settings_dialog import SettingsDialog
 from ui.command_manager import CommandManagerWindow
 from ui.appearance_dialog import AppearanceDialog, apply_theme, load_theme
 from ui.checklist_window import ChecklistWindow
-from core import favourites, config_backup
+from core import favourites, config_backup, settings
 from ui.update_dialog import UpdatePromptWindow
 from core import update_manager, activity
 from ui.code_review_manager import CodeReviewManagerWindow
@@ -42,9 +42,16 @@ class MainWindow(Gtk.Window):
         self.add(vbox)
         vbox.pack_start(self._build_menubar(), False, False, 0)
 
-        outer_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        outer_paned.set_position(320)
-        vbox.pack_start(outer_paned, True, True, 0)
+        # Main layout:
+        # Sidebar | Project Dashboard | Git/Tools Panel
+        # Both splitters are draggable and their positions are remembered.
+        self.outer_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self.outer_paned.set_position(int(settings.get("main_outer_pane_position") or 340))
+        try:
+            self.outer_paned.set_wide_handle(True)
+        except Exception:
+            pass
+        vbox.pack_start(self.outer_paned, True, True, 0)
 
         self.commit_panel = CommitPanel()
         self.project_dashboard = ProjectDashboard(on_commands_changed=lambda: self.project_list.refresh())
@@ -53,13 +60,22 @@ class MainWindow(Gtk.Window):
             on_code_review=self._run_code_review,
         )
 
-        right_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        right_paned.set_position(300)
-        right_paned.pack1(self.project_dashboard, resize=False, shrink=False)
-        right_paned.pack2(self.commit_panel, resize=True, shrink=False)
+        self.right_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self.right_paned.set_position(int(settings.get("main_right_pane_position") or 330))
+        try:
+            self.right_paned.set_wide_handle(True)
+        except Exception:
+            pass
 
-        outer_paned.pack1(self.project_list, resize=False, shrink=False)
-        outer_paned.pack2(right_paned, resize=True, shrink=False)
+        # resize=True means all three areas can be pulled/resized properly.
+        self.right_paned.pack1(self.project_dashboard, resize=True, shrink=False)
+        self.right_paned.pack2(self.commit_panel, resize=True, shrink=False)
+
+        self.outer_paned.pack1(self.project_list, resize=True, shrink=False)
+        self.outer_paned.pack2(self.right_paned, resize=True, shrink=False)
+
+        self.outer_paned.connect("notify::position", self._save_main_pane_positions)
+        self.right_paned.connect("notify::position", self._save_main_pane_positions)
 
         self.statusbar = Gtk.Statusbar()
         self.statusbar.push(0, "Ready — select a project to begin")
@@ -68,6 +84,16 @@ class MainWindow(Gtk.Window):
         self.connect("delete-event", self._on_main_delete_event)
 
         GLib.timeout_add(1200, self._startup_update_check)
+
+    def _save_main_pane_positions(self, *_):
+        """Remember main splitter positions between launches."""
+        try:
+            if hasattr(self, "outer_paned"):
+                settings.set_value("main_outer_pane_position", int(self.outer_paned.get_position()))
+            if hasattr(self, "right_paned"):
+                settings.set_value("main_right_pane_position", int(self.right_paned.get_position()))
+        except Exception:
+            pass
 
     # ── Menubar ──────────────────────────────────────────────────────────────
 
