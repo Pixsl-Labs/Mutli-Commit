@@ -12,7 +12,7 @@ from ui.command_manager import CommandManagerWindow
 from ui.appearance_dialog import AppearanceDialog, apply_theme, load_theme
 from ui.checklist_window import ChecklistWindow
 from core import favourites, config_backup, settings
-from ui.update_dialog import UpdatePromptWindow
+from ui.update_dialog import UpdatePromptWindow, UpdateCenterWindow
 from core import update_manager, activity
 from ui.code_review_manager import CodeReviewManagerWindow
 from ui.table_lab import TableLabWindow
@@ -24,6 +24,7 @@ class MainWindow(Gtk.Window):
         super().__init__(title="Multi-Commit")
         self.set_wmclass("multi-commit", "Multi-Commit")
         self.set_default_size(960, 640)
+        self.set_position(Gtk.WindowPosition.CENTER)
         self.set_border_width(0)
         self._cmd_manager_win = None
         self._appearance_win  = None
@@ -149,6 +150,12 @@ class MainWindow(Gtk.Window):
             None,
             ("Keyboard Shortcuts",   self._show_shortcuts),
             ("About Multi-Commit",   self._show_about),
+        ]))
+
+        menubar.append(self._menu("Updates", [
+            ("🔄 Update Center", self._open_update_center),
+            ("Check for Updates", self._manual_update_check),
+            ("Preview Update Popup", self._preview_update_popup),
         ]))
 
         return menubar
@@ -333,10 +340,20 @@ class MainWindow(Gtk.Window):
         dlg.run()
         dlg.destroy()
 
+    def _open_update_center(self, _=None):
+        win = UpdateCenterWindow(self)
+        win.present()
+
     def _startup_update_check(self):
-        info = update_manager.check_for_update()
-        if info.get("available"):
-            self._show_update_prompt(info)
+        try:
+            info = update_manager.check_for_update()
+            if info.get("available"):
+                self._show_update_prompt(info)
+        except Exception as e:
+            try:
+                self.statusbar.push(0, f"Update check skipped: {e}")
+            except Exception:
+                pass
         return False
 
     def _manual_update_check(self, _=None):
