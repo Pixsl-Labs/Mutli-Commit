@@ -2,7 +2,7 @@
 import os
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Pango, Gdk
+from gi.repository import Gtk, Pango, Gdk, GLib
 
 from core import checklists, activity, settings
 
@@ -1416,3 +1416,194 @@ Rules:
             self.items_list.unselect_all()
 
         return False
+
+
+# ── Multi-Commit checklist resume patch ─────────────────────────────────────
+#
+# Stores UI-only checklist resume state in settings.json, separate from the
+# actual checklist data. This avoids marking tasks dirty just because the user
+# clicked around.
+
+def _mc_checklist_resume_key(self):
+    try:
+        return os.path.abspath(os.path.expanduser(self.project_path))
+    except Exception:
+        return ""
+
+
+def _mc_checklist_get_resume_store():
+    store = settings.get("checklist_resume_state") or {}
+    return store if isinstance(store, dict) else {}
+
+
+def _mc_checklist_selected_indexes(self):
+    stage_index = getattr(self, "selected_stage_index", None)
+    item_index = getattr(self, "selected_item_index", None)
+
+    try:
+        stage_row = self.stage_list.get_selected_row()
+        if stage_row is not None and hasattr(stage_row, "stage_index"):
+            stage_index = stage_row.stage_index
+    except Exception:
+        pass
+
+    try:
+        item_row = self.items_list.get_selected_row()
+        if item_row is not None and hasattr(item_row, "item_index"):
+            item_index = item_row.item_index
+    except Exception:
+        pass
+
+    return stage_index, item_index
+
+
+def _mc_checklist_save_resume_selection(self):
+    if getattr(self, "_mc_restoring_resume_selection", False):
+        return
+
+    key = self._mc_checklist_resume_key()
+    if not key:
+        return
+
+    stage_index, item_index = self._mc_checklist_selected_indexes()
+
+    if stage_index is None:
+        return
+
+    store = _mc_checklist_get_resume_store()
+    store[key] = {
+        "stage": int(stage_index),
+        "item": int(item_index) if item_index is not None else None,
+    }
+
+    settings.set_value("checklist_resume_state", store)
+
+
+def _mc_checklist_restore_resume_selection(self):
+    key = self._mc_checklist_resume_key()
+    store = _mc_checklist_get_resume_store()
+    saved = store.get(key) or {}
+
+    stages = self.project_data.get("stages", [])
+    if not stages:
+        return False
+
+    try:
+        stage_index = int(saved.get("stage", 0))
+    except Exception:
+        stage_index = 0
+
+    stage_index = max(0, min(stage_index, len(stages) - 1))
+
+    try:
+        item_index = saved.get("item", None)
+        item_index = int(item_index) if item_index is not None else None
+    except Exception:
+        item_index = None
+
+    self._mc_restoring_resume_selection = True
+
+    try:
+        stage_row = self.stage_list.get_row_at_index(stage_index)
+
+        if stage_row is not None:
+            self.stage_list.select_row(stage_row)
+            self.selected_stage_index = stage_index
+            try:
+                stage_row.grab_focus()
+            except Exception:
+                pass
+
+    finally:
+        self._mc_restoring_resume_selection = False
+
+    def restore_item_after_stage_load():
+        self._mc_restoring_resume_selection = True
+
+        try:
+            current_stages = self.project_data.get("stages", [])
+
+            if not current_stages or stage_index >= len(current_stages):
+                return False
+
+            items = current_stages[stage_index].get("items", [])
+
+            if not items or item_index is None:
+                return False
+
+            safe_item_index = max(0, min(item_index, len(items) - 1))
+            item_row = self.items_list.get_row_at_index(safe_item_index)
+
+            if item_row is not None:
+                self.items_list.select_row(item_row)
+                self.selected_item_index = safe_item_index
+
+                try:
+                    item_row.grab_focus()
+                except Exception:
+                    pass
+
+                if hasattr(self, "status_lbl"):
+                    self.status_lbl.set_text("Resumed last checklist item.")
+
+        finally:
+            self._mc_restoring_resume_selection = False
+
+        return False
+
+    GLib.idle_add(restore_item_after_stage_load)
+    return False
+
+
+if not getattr(ChecklistWindow, "_mc_resume_patch_applied", False):
+    ChecklistWindow._mc_original_init = ChecklistWindow.__init__
+    ChecklistWindow._mc_original_on_close = ChecklistWindow._on_close
+
+    if hasattr(ChecklistWindow, "_on_stage_selected"):
+        ChecklistWindow._mc_original_on_stage_selected = ChecklistWindow._on_stage_selected
+
+    if hasattr(ChecklistWindow, "_on_item_selected"):
+        ChecklistWindow._mc_original_on_item_selected = ChecklistWindow._on_item_selected
+
+    ChecklistWindow._mc_checklist_resume_key = _mc_checklist_resume_key
+    ChecklistWindow._mc_checklist_save_resume_selection = _mc_checklist_save_resume_selection
+    ChecklistWindow._mc_checklist_restore_resume_selection = _mc_checklist_restore_resume_selection
+
+    def _mc_resume_init(self, *args, **kwargs):
+        ChecklistWindow._mc_original_init(self, *args, **kwargs)
+        GLib.idle_add(self._mc_checklist_restore_resume_selection)
+
+    def _mc_resume_on_close(self, *args, **kwargs):
+        self._mc_checklist_save_resume_selection()
+        return ChecklistWindow._mc_original_on_close(self, *args, **kwargs)
+
+    ChecklistWindow.__init__ = _mc_resume_init
+    ChecklistWindow._on_close = _mc_resume_on_close
+
+    if hasattr(ChecklistWindow, "_on_stage_selected"):
+        def _mc_resume_on_stage_selected(self, listbox, row):
+            result = ChecklistWindow._mc_original_on_stage_selected(self, listbox, row)
+
+            if row is not None and hasattr(row, "stage_index"):
+                self.selected_stage_index = row.stage_index
+                self.selected_item_index = None
+                self._mc_checklist_save_resume_selection()
+
+            return result
+
+        ChecklistWindow._on_stage_selected = _mc_resume_on_stage_selected
+
+    if hasattr(ChecklistWindow, "_on_item_selected"):
+        def _mc_resume_on_item_selected(self, listbox, row):
+            result = ChecklistWindow._mc_original_on_item_selected(self, listbox, row)
+
+            if row is not None and hasattr(row, "item_index"):
+                self.selected_item_index = row.item_index
+                self._mc_checklist_save_resume_selection()
+
+            return result
+
+        ChecklistWindow._on_item_selected = _mc_resume_on_item_selected
+
+    ChecklistWindow._mc_resume_patch_applied = True
+
