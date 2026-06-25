@@ -694,3 +694,116 @@ class CommitPanel(Gtk.Box):
         self._do_commit(None)
         self._do_push_all(None)
         self._log("⚡ Done!")
+
+
+# ── Multi-Commit safety/validator patch ─────────────────────────────────────
+# Non-invasive wrappers: normal commit flow remains unchanged.
+try:
+    from gi.repository import Gtk
+    from core import command_safety
+except Exception:
+    Gtk = None
+    command_safety = None
+
+
+def _mc_commit_feedback(message):
+    msg = (message or "").strip()
+
+    if not msg:
+        return ("dialog-error-symbolic", "Commit message is empty.")
+
+    if len(msg) > 72:
+        return ("dialog-warning-symbolic", "Commit message is over 72 characters. Still allowed, just less tidy.")
+
+    prefixes = ("feat:", "fix:", "docs:", "refactor:", "test:", "chore:", "style:", "perf:", "ci:", "build:")
+    if msg.startswith(prefixes):
+        return ("emblem-ok-symbolic", "Good conventional-style commit message.")
+
+    if ":" not in msg:
+        return ("dialog-warning-symbolic", "Tip: consider a prefix like feat:, fix:, docs:, refactor:, test:, chore:.")
+
+    return ("emblem-ok-symbolic", "Looks fine.")
+
+
+def _mc_validate_commit_entry(self, *_):
+    if Gtk is None or not hasattr(self, "commit_entry"):
+        return
+
+    icon, tip = _mc_commit_feedback(self.commit_entry.get_text())
+
+    try:
+        self.commit_entry.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, icon)
+        self.commit_entry.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, tip)
+        self.commit_entry.set_tooltip_text(tip)
+    except Exception:
+        pass
+
+
+def _mc_confirm_risky_command(self, command):
+    if Gtk is None or command_safety is None:
+        return True
+
+    if not command_safety.is_dangerous(command):
+        return True
+
+    dlg = Gtk.MessageDialog(
+        transient_for=self.get_toplevel(),
+        flags=0,
+        message_type=Gtk.MessageType.WARNING,
+        buttons=Gtk.ButtonsType.YES_NO,
+        text="Risky command detected"
+    )
+    dlg.format_secondary_text(command_safety.warning_text(command))
+    response = dlg.run()
+    dlg.destroy()
+
+    return response == Gtk.ResponseType.YES
+
+
+if not getattr(CommitPanel, "_mc_safety_validator_patch_applied", False):
+    CommitPanel._mc_base_init = CommitPanel.__init__
+    CommitPanel._mc_base_do_custom = getattr(CommitPanel, "_do_custom", None)
+
+    def _mc_init(self, *args, **kwargs):
+        CommitPanel._mc_base_init(self, *args, **kwargs)
+
+        if hasattr(self, "commit_entry"):
+            try:
+                self.commit_entry.set_placeholder_text("feat: add useful thing")
+                self.commit_entry.connect("changed", self._mc_validate_commit_entry)
+                self._mc_validate_commit_entry()
+            except Exception:
+                pass
+
+        if hasattr(self, "custom_entry"):
+            try:
+                self.custom_entry.set_tooltip_text(
+                    "Custom commands are allowed. Multi-Commit warns before risky commands like reset --hard, clean -fd, rm -rf, push --force."
+                )
+            except Exception:
+                pass
+
+    def _mc_do_custom(self, *args, **kwargs):
+        cmd = ""
+
+        try:
+            cmd = self.custom_entry.get_text().strip()
+        except Exception:
+            cmd = ""
+
+        if cmd and not self._mc_confirm_risky_command(cmd):
+            try:
+                self._set_result(self.custom_result, False, "Risky command cancelled.")
+            except Exception:
+                pass
+            return
+
+        if CommitPanel._mc_base_do_custom:
+            return CommitPanel._mc_base_do_custom(self, *args, **kwargs)
+
+    CommitPanel.__init__ = _mc_init
+    CommitPanel._do_custom = _mc_do_custom
+    CommitPanel._mc_validate_commit_entry = _mc_validate_commit_entry
+    CommitPanel._mc_confirm_risky_command = _mc_confirm_risky_command
+    CommitPanel._mc_safety_validator_patch_applied = True
+

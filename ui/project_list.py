@@ -512,3 +512,56 @@ class ProjectListPanel(Gtk.Box):
             project_groups.remove_group(group_id, move_projects_to_default=True)
             self.refresh()
         dlg.destroy()
+
+
+# ── Multi-Commit pinned command safety patch ────────────────────────────────
+try:
+    from gi.repository import Gtk
+    from core import command_safety
+except Exception:
+    Gtk = None
+    command_safety = None
+
+
+def _mc_project_list_confirm_risky_command(self, command):
+    if Gtk is None or command_safety is None:
+        return True
+
+    if not command_safety.is_dangerous(command):
+        return True
+
+    dlg = Gtk.MessageDialog(
+        transient_for=self.get_toplevel(),
+        flags=0,
+        message_type=Gtk.MessageType.WARNING,
+        buttons=Gtk.ButtonsType.YES_NO,
+        text="Risky pinned command detected"
+    )
+    dlg.format_secondary_text(command_safety.warning_text(command))
+    response = dlg.run()
+    dlg.destroy()
+    return response == Gtk.ResponseType.YES
+
+
+if not getattr(ProjectListPanel, "_mc_pinned_command_safety_patch_applied", False):
+    ProjectListPanel._mc_base_run_pinned_command = getattr(ProjectListPanel, "_run_pinned_command", None)
+
+    def _mc_safe_run_pinned_command(self, path, cmd):
+        command = cmd.get("command", "") if isinstance(cmd, dict) else ""
+
+        try:
+            branch = get_current_branch(path) if is_git_repo(path) else ""
+            command = project_commands.render(command, path, branch)
+        except Exception:
+            pass
+
+        if command and not self._mc_project_list_confirm_risky_command(command):
+            return
+
+        if ProjectListPanel._mc_base_run_pinned_command:
+            return ProjectListPanel._mc_base_run_pinned_command(self, path, cmd)
+
+    ProjectListPanel._run_pinned_command = _mc_safe_run_pinned_command
+    ProjectListPanel._mc_project_list_confirm_risky_command = _mc_project_list_confirm_risky_command
+    ProjectListPanel._mc_pinned_command_safety_patch_applied = True
+

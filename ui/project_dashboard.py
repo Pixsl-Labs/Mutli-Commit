@@ -3,533 +3,590 @@ import os
 import shlex
 import subprocess
 import gi
+
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Pango, Gdk, GLib
+from gi.repository import Gtk, Gdk, Pango, GLib
+
 from core import git_ops, settings, project_commands, activity
-from ui.session_manager import SessionManagerWindow
+
 
 class ProjectDashboard(Gtk.Box):
     def __init__(self, on_commands_changed=None):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.project_path = None
+        self.on_commands_changed = on_commands_changed
         self._refresh_source_id = None
         self._busy = False
-        self.on_commands_changed = on_commands_changed
-        self.set_size_request(300, -1)
+        self.set_size_request(320, -1)
         self._apply_css()
         self._build()
 
     def _apply_css(self):
         css = b"""
-        .dashboard-header { background: alpha(white, 0.04); border-bottom: 1px solid alpha(white, 0.1); padding: 10px; }
-        .dashboard-card { background: alpha(white, 0.035); border: 1px solid alpha(white, 0.08); border-radius: 7px; padding: 8px; margin: 5px 8px; }
+        .dashboard-header {
+            background: alpha(white, 0.04);
+            border-bottom: 1px solid alpha(white, 0.10);
+            padding: 10px;
+        }
+        .dashboard-card {
+            background: alpha(white, 0.035);
+            border: 1px solid alpha(white, 0.08);
+            border-radius: 7px;
+            padding: 8px;
+            margin: 6px 8px;
+        }
         .dashboard-title { font-size: 12px; font-weight: bold; }
-        .dashboard-muted { font-size: 10px; opacity: 0.55; }
+        .dashboard-muted { font-size: 10px; opacity: 0.58; }
         .dashboard-value { font-size: 11px; }
-        .project-command-row { border-bottom: 1px solid alpha(white, 0.06); padding: 4px; }
+        .project-command-row {
+            border-bottom: 1px solid alpha(white, 0.06);
+            padding: 4px;
+        }
         .project-command-name { font-weight: bold; font-size: 11px; }
-        .project-command-preview { font-family: monospace; font-size: 10px; opacity: 0.60; }
-        .tiny-action-btn { font-size: 10px; padding: 1px 4px; border-radius: 4px; }
+        .project-command-preview {
+            font-family: monospace;
+            font-size: 10px;
+            opacity: 0.60;
+        }
+        .tiny-action-btn {
+            font-size: 10px;
+            padding: 1px 4px;
+            border-radius: 4px;
+        }
         """
         provider = Gtk.CssProvider()
         provider.load_from_data(css)
-        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
 
     def _build(self):
-        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         header.get_style_context().add_class("dashboard-header")
+
         self.title_lbl = Gtk.Label()
         self.title_lbl.set_markup("<b>Project Dashboard</b>")
         self.title_lbl.set_halign(Gtk.Align.START)
+        self.title_lbl.set_ellipsize(Pango.EllipsizeMode.END)
         header.pack_start(self.title_lbl, False, False, 0)
-        self.path_lbl = Gtk.Label(label="Select a project to view dashboard")
-        self.path_lbl.get_style_context().add_class("dashboard-muted")
+
+        self.path_lbl = Gtk.Label(label="Select a project")
         self.path_lbl.set_halign(Gtk.Align.START)
         self.path_lbl.set_ellipsize(Pango.EllipsizeMode.START)
+        self.path_lbl.get_style_context().add_class("dashboard-muted")
         header.pack_start(self.path_lbl, False, False, 0)
+
         self.pack_start(header, False, False, 0)
-
-        session_row = Gtk.Box(spacing=6)
-        session_row.set_border_width(6)
-
-        session_btn = Gtk.Button(label="🚀 Launch Session")
-        session_btn.set_tooltip_text("Open VSCode, terminals, checklist, README, code review and default command")
-        session_btn.connect("clicked", self._launch_session)
-        session_row.pack_start(session_btn, True, True, 0)
-
-        self.pack_start(session_row, False, False, 0)
-
-        refresh_row = Gtk.Box(spacing=6)
-        refresh_row.set_border_width(6)
-
-        refresh_btn = Gtk.Button(label="↻ Refresh")
-        refresh_btn.set_tooltip_text("Refresh repo health now")
-        refresh_btn.set_relief(Gtk.ReliefStyle.NONE)
-        refresh_btn.connect("clicked", lambda _: self.refresh())
-        refresh_row.pack_start(refresh_btn, False, False, 0)
-
-        refresh_lbl = Gtk.Label(label="Auto:")
-        refresh_lbl.get_style_context().add_class("dashboard-muted")
-        refresh_row.pack_start(refresh_lbl, False, False, 0)
-
-        self.refresh_combo = Gtk.ComboBoxText()
-        self.refresh_combo.append("0", "Off")
-        self.refresh_combo.append("30", "30s")
-        self.refresh_combo.append("60", "1m")
-        self.refresh_combo.append("300", "5m")
-
-        interval = str(settings.get("dashboard_refresh_interval") or 60)
-        self.refresh_combo.set_active_id(interval if interval in ["0", "30", "60", "300"] else "60")
-        self.refresh_combo.connect("changed", self._on_refresh_interval_changed)
-        refresh_row.pack_start(self.refresh_combo, False, False, 0)
-
-        self.last_refresh_lbl = Gtk.Label(label="Not refreshed yet")
-        self.last_refresh_lbl.get_style_context().add_class("dashboard-muted")
-        self.last_refresh_lbl.set_halign(Gtk.Align.END)
-        refresh_row.pack_end(self.last_refresh_lbl, True, True, 0)
-
-        self.pack_start(refresh_row, False, False, 0)
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         scroll.add(self.inner)
         self.pack_start(scroll, True, True, 0)
 
-        self.commands_box = self._card("⚡ Project Commands")
-        self.commands_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.commands_box.pack_start(self.commands_content, False, False, 0)
-        self.inner.pack_start(self.commands_box, False, False, 0)
-
-        self.health_box = self._card("💚 Repo Health")
-        self.health_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.health_box.pack_start(self.health_content, False, False, 0)
-        self.inner.pack_start(self.health_box, False, False, 0)
-
-        self.activity_box = self._card("🕘 Recent Activity")
-        self.activity_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.activity_box.pack_start(self.activity_content, False, False, 0)
-        self.inner.pack_start(self.activity_box, False, False, 0)
-
-        self.metrics_box = self._card("📊 Metrics")
-        self.metrics_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.metrics_box.pack_start(self.metrics_content, False, False, 0)
-        self.inner.pack_start(self.metrics_box, False, False, 0)
-        self._refresh_empty()
+        self._build_commands_card()
+        self._build_repo_health_card()
+        self._build_activity_card()
+        self._build_metrics_card()
 
     def _card(self, title):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.get_style_context().add_class("dashboard-card")
-        top = Gtk.Box(spacing=6)
-        lbl = Gtk.Label()
-        lbl.set_markup(f"<b>{title}</b>")
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        card.get_style_context().add_class("dashboard-card")
+
+        lbl = Gtk.Label(label=title)
         lbl.set_halign(Gtk.Align.START)
         lbl.get_style_context().add_class("dashboard-title")
-        top.pack_start(lbl, True, True, 0)
-        if title.startswith("⚡"):
-            add_btn = Gtk.Button(label="＋")
-            add_btn.set_tooltip_text("Add a command for this project")
-            add_btn.set_relief(Gtk.ReliefStyle.NONE)
-            add_btn.connect("clicked", self._add_command_dialog)
-            top.pack_end(add_btn, False, False, 0)
-        box.pack_start(top, False, False, 0)
-        return box
+        card.pack_start(lbl, False, False, 0)
 
-    def _clear(self, box):
-        for child in box.get_children():
-            box.remove(child)
+        self.inner.pack_start(card, False, False, 0)
+        return card
 
-    def _row(self, label, value):
-        row = Gtk.Box(spacing=6)
-        left = Gtk.Label(label=label)
-        left.set_halign(Gtk.Align.START)
-        left.get_style_context().add_class("dashboard-muted")
-        row.pack_start(left, True, True, 0)
-        right = Gtk.Label(label=value)
-        right.set_halign(Gtk.Align.END)
-        right.set_ellipsize(Pango.EllipsizeMode.END)
-        right.get_style_context().add_class("dashboard-value")
-        row.pack_end(right, False, False, 0)
-        return row
+    def _build_commands_card(self):
+        card = self._card("⚡ Project Commands")
+
+        top = Gtk.Box(spacing=6)
+        add_btn = Gtk.Button(label="+ Add")
+        add_btn.get_style_context().add_class("tiny-action-btn")
+        add_btn.connect("clicked", self._add_command)
+        top.pack_start(add_btn, False, False, 0)
+
+        refresh_btn = Gtk.Button(label="↻")
+        refresh_btn.get_style_context().add_class("tiny-action-btn")
+        refresh_btn.connect("clicked", lambda _: self.refresh())
+        top.pack_end(refresh_btn, False, False, 0)
+
+        card.pack_start(top, False, False, 0)
+
+        self.commands_list = Gtk.ListBox()
+        self.commands_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        card.pack_start(self.commands_list, False, False, 0)
+
+    def _build_repo_health_card(self):
+        card = self._card("🩺 Repo Health")
+        self.repo_health_lbl = Gtk.Label(label="No project selected.")
+        self.repo_health_lbl.set_halign(Gtk.Align.START)
+        self.repo_health_lbl.set_line_wrap(True)
+        self.repo_health_lbl.get_style_context().add_class("dashboard-value")
+        card.pack_start(self.repo_health_lbl, False, False, 0)
+
+    def _build_activity_card(self):
+        card = self._card("🕒 Recent Activity")
+        self.activity_list = Gtk.ListBox()
+        self.activity_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        card.pack_start(self.activity_list, False, False, 0)
+
+    def _build_metrics_card(self):
+        card = self._card("📊 Metrics")
+        self.metrics_lbl = Gtk.Label(label="No metrics yet.")
+        self.metrics_lbl.set_halign(Gtk.Align.START)
+        self.metrics_lbl.set_line_wrap(True)
+        self.metrics_lbl.get_style_context().add_class("dashboard-value")
+        card.pack_start(self.metrics_lbl, False, False, 0)
 
     def set_project(self, path):
-        self.project_path = path
-        self.title_lbl.set_markup(f"<b>{os.path.basename(path)}</b>")
-        self.path_lbl.set_text(path)
+        self.project_path = os.path.abspath(os.path.expanduser(path)) if path else None
+
+        if self.project_path:
+            self.title_lbl.set_markup(f"<b>{os.path.basename(self.project_path)}</b>")
+            self.path_lbl.set_text(self.project_path)
+            activity.log_event(self.project_path, "project_opened", "Opened project dashboard")
+        else:
+            self.title_lbl.set_markup("<b>Project Dashboard</b>")
+            self.path_lbl.set_text("Select a project")
+
         self.refresh()
-        self.start_auto_refresh()
+        self._start_refresh_timer()
+
+    def _start_refresh_timer(self):
+        if self._refresh_source_id:
+            GLib.source_remove(self._refresh_source_id)
+            self._refresh_source_id = None
+
+        interval = int(settings.get("dashboard_refresh_interval") or 60)
+
+        if interval <= 0:
+            return
+
+        self._refresh_source_id = GLib.timeout_add_seconds(interval, self._timer_refresh)
+
+    def _timer_refresh(self):
+        if self.project_path and not self._busy:
+            self.refresh()
+        return True
 
     def refresh(self):
-        if not self.project_path:
-            self._refresh_empty()
-            return
         self._refresh_commands()
-        self._refresh_health()
-        self._refresh_health()
+        self._refresh_repo_health()
+        self._refresh_activity()
         self._refresh_metrics()
-        self.show_all()
-
-    def _refresh_empty(self):
-        self._clear(self.commands_content)
-        self.commands_content.pack_start(Gtk.Label(label="Select a project first."), False, False, 0)
-        self._clear(self.health_content)
-        self.health_content.pack_start(Gtk.Label(label="No project selected."), False, False, 0)
-        self.show_all()
 
     def _refresh_commands(self):
-        self._clear(self.commands_content)
-        cmds = project_commands.list_commands(self.project_path)
-        if not cmds:
-            hint = Gtk.Label(label="No project commands yet. Click ＋ to add one.")
-            hint.set_halign(Gtk.Align.START)
-            hint.get_style_context().add_class("dashboard-muted")
-            self.commands_content.pack_start(hint, False, False, 0)
-            return
-
-        for cmd in cmds:
-            self.commands_content.pack_start(self._command_row(cmd), False, False, 0)
-
-    def _refresh_activity(self):
-        self._clear(self.activity_content)
+        for child in self.commands_list.get_children():
+            self.commands_list.remove(child)
 
         if not self.project_path:
-            lbl = Gtk.Label(label="No project selected.")
-            lbl.set_halign(Gtk.Align.START)
-            lbl.get_style_context().add_class("dashboard-muted")
-            self.activity_content.pack_start(lbl, False, False, 0)
+            self._empty_row(self.commands_list, "Select a project first.")
+            self.commands_list.show_all()
             return
 
-        events = activity.recent(self.project_path, limit=8)
+        commands = project_commands.list_commands(self.project_path)
 
-        if not events:
-            lbl = Gtk.Label(label="No activity yet.")
-            lbl.set_halign(Gtk.Align.START)
-            lbl.get_style_context().add_class("dashboard-muted")
-            self.activity_content.pack_start(lbl, False, False, 0)
+        if not commands:
+            self._empty_row(self.commands_list, "No project commands yet. Add one.")
+            self.commands_list.show_all()
             return
 
-        for event in events:
-            time_part = event.get("timestamp", "").split("T")[-1][:5]
-            msg = event.get("message", "")
-            lbl = Gtk.Label(label=f"{time_part}  {msg}")
-            lbl.set_halign(Gtk.Align.START)
-            lbl.set_xalign(0.0)
-            lbl.set_line_wrap(True)
-            lbl.get_style_context().add_class("dashboard-value")
-            self.activity_content.pack_start(lbl, False, False, 0)
+        for cmd in commands:
+            self.commands_list.add(self._make_command_row(cmd))
 
-    def _refresh_metrics(self):
-        self._clear(self.metrics_content)
+        self.commands_list.show_all()
 
-        if not self.project_path:
-            lbl = Gtk.Label(label="No project selected.")
-            lbl.set_halign(Gtk.Align.START)
-            lbl.get_style_context().add_class("dashboard-muted")
-            self.metrics_content.pack_start(lbl, False, False, 0)
-            return
+    def _empty_row(self, list_box, text):
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        lbl = Gtk.Label(label=text)
+        lbl.set_margin_top(6)
+        lbl.set_margin_bottom(6)
+        lbl.get_style_context().add_class("dashboard-muted")
+        row.add(lbl)
+        list_box.add(row)
 
-        counts = activity.metrics(self.project_path, days=7)
+    def _make_command_row(self, cmd):
+        row = Gtk.ListBoxRow()
+        row.command_id = cmd.get("id")
+        row.get_style_context().add_class("project-command-row")
 
-        self.metrics_content.pack_start(self._row("Commits", str(counts["commits"])), False, False, 0)
-        self.metrics_content.pack_start(self._row("Pushes", str(counts["pushes"])), False, False, 0)
-        self.metrics_content.pack_start(self._row("Commands", str(counts["commands"])), False, False, 0)
-        self.metrics_content.pack_start(self._row("Checklists", str(counts["checklists"])), False, False, 0)
-        self.metrics_content.pack_start(self._row("Code reviews", str(counts["code_reviews"])), False, False, 0)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        outer.set_border_width(4)
 
-    def _command_row(self, cmd):
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        outer.get_style_context().add_class("project-command-row")
+        title = cmd.get("name", "Command")
+        badges = []
+        if cmd.get("default"):
+            badges.append("default")
+        if cmd.get("pinned"):
+            badges.append("pinned")
 
-        top = Gtk.Box(spacing=4)
-        name = cmd.get("name", "Command")
-        flags = ("⭐ " if cmd.get("pinned") else "") + ("🎯 " if cmd.get("default") else "")
-        name_lbl = Gtk.Label(label=flags + name)
+        name_lbl = Gtk.Label(label=title + (f"  ·  {', '.join(badges)}" if badges else ""))
         name_lbl.set_halign(Gtk.Align.START)
         name_lbl.set_ellipsize(Pango.EllipsizeMode.END)
         name_lbl.get_style_context().add_class("project-command-name")
-        top.pack_start(name_lbl, True, True, 0)
+        outer.pack_start(name_lbl, False, False, 0)
 
-        actions = [
-            ("▶", "Run silently", lambda _ : self._run_command(cmd, terminal=False)),
-            ("🖥", "Run in terminal", lambda _ : self._run_command(cmd, terminal=True)),
-            ("📋", "Copy command", lambda _ : self._copy_command(cmd)),
-            ("✏", "Edit command", lambda _ : self._edit_command_dialog(cmd)),
-            ("⭐", "Pin/unpin command in sidebar", lambda _ : self._toggle_pin(cmd)),
-        ]
-        for label, tip, cb in actions:
-            btn = Gtk.Button(label=label)
-            btn.set_tooltip_text(tip)
-            btn.set_relief(Gtk.ReliefStyle.NONE)
-            btn.get_style_context().add_class("tiny-action-btn")
-            btn.connect("clicked", cb)
-            top.pack_end(btn, False, False, 0)
-        outer.pack_start(top, False, False, 0)
+        preview = project_commands.render(cmd.get("command", ""), self.project_path, self._branch())
+        preview_lbl = Gtk.Label(label=preview)
+        preview_lbl.set_halign(Gtk.Align.START)
+        preview_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        preview_lbl.get_style_context().add_class("project-command-preview")
+        outer.pack_start(preview_lbl, False, False, 0)
 
-        preview = cmd.get("command", "")[:85] + ("…" if len(cmd.get("command", "")) > 85 else "")
-        prev = Gtk.Label(label=preview)
-        prev.set_halign(Gtk.Align.START)
-        prev.set_ellipsize(Pango.EllipsizeMode.END)
-        prev.get_style_context().add_class("project-command-preview")
-        outer.pack_start(prev, False, False, 0)
+        btns = Gtk.Box(spacing=4)
 
-        move_row = Gtk.Box(spacing=4)
-        for label, tip, cb in [
-            ("⬆", "Move command up", lambda _ : self._move_command(cmd, -1)),
-            ("⬇", "Move command down", lambda _ : self._move_command(cmd, 1)),
-            ("🎯 Default", "Set as default project command", lambda _ : self._set_default(cmd)),
-            ("🗑", "Delete command", lambda _ : self._delete_command(cmd)),
+        for label, cb in [
+            ("Run", lambda _, c=cmd: self._run_command(c, terminal=False)),
+            ("Terminal", lambda _, c=cmd: self._run_command(c, terminal=True)),
+            ("Copy", lambda _, c=cmd: self._copy_command(c)),
+            ("Edit", lambda _, c=cmd: self._edit_command(c)),
+            ("Pin", lambda _, c=cmd: self._toggle_pin(c)),
+            ("Default", lambda _, c=cmd: self._set_default(c)),
+            ("↑", lambda _, c=cmd: self._move_command(c, -1)),
+            ("↓", lambda _, c=cmd: self._move_command(c, 1)),
+            ("Del", lambda _, c=cmd: self._delete_command(c)),
         ]:
             btn = Gtk.Button(label=label)
-            btn.set_tooltip_text(tip)
-            btn.set_relief(Gtk.ReliefStyle.NONE)
             btn.get_style_context().add_class("tiny-action-btn")
             btn.connect("clicked", cb)
-            move_row.pack_start(btn, False, False, 0)
-        outer.pack_start(move_row, False, False, 0)
-        return outer
+            btns.pack_start(btn, False, False, 0)
 
-    def _refresh_health(self):
-        self._clear(self.health_content)
-        branch = git_ops.get_current_branch(self.project_path)
-        status = git_ops.get_status(self.project_path)
-        changed = len(status.splitlines()) if status else 0
-        untracked = len([l for l in status.splitlines() if l.startswith("??")]) if status else 0
-        remotes = git_ops.get_remotes(self.project_path)
-        ok_commit, latest_commit = git_ops.run_custom(self.project_path, "git log -1 --pretty=%s")
-        ok_stash, stash_out = git_ops.run_custom(self.project_path, "git stash list")
-        ok_tags, tags_out = git_ops.run_custom(self.project_path, "git tag")
-        ok_ahead, ahead_out = git_ops.run_custom(self.project_path, "git status -sb")
+        outer.pack_start(btns, False, False, 0)
+        row.add(outer)
+        return row
 
-        self.health_content.pack_start(self._row("Branch", branch or "main"), False, False, 0)
-        self.health_content.pack_start(self._row("Changed", str(changed)), False, False, 0)
-        self.health_content.pack_start(self._row("Untracked", str(untracked)), False, False, 0)
-        self.health_content.pack_start(self._row("Ahead/behind", self._parse_ahead_behind(ahead_out if ok_ahead else "")), False, False, 0)
-        self.health_content.pack_start(self._row("Remotes", ", ".join(remotes) if remotes else "none"), False, False, 0)
-        self.health_content.pack_start(self._row("Latest", latest_commit if ok_commit and latest_commit else "none"), False, False, 0)
-        self.health_content.pack_start(self._row("Stashes", str(len(stash_out.splitlines())) if ok_stash and stash_out else "0"), False, False, 0)
-        self.health_content.pack_start(self._row("Tags", str(len(tags_out.splitlines())) if ok_tags and tags_out else "0"), False, False, 0)
-
-        from datetime import datetime
-        self.last_refresh_lbl.set_text("Last refreshed " + datetime.now().strftime("%H:%M:%S"))
-
-    def _parse_ahead_behind(self, status_line):
-        first = (status_line or "").splitlines()[0] if status_line else ""
-        if "ahead" not in first and "behind" not in first:
-            return "synced/unknown"
-        return first.split("[")[-1].rstrip("]")
-
-    def _render(self, cmd):
-        branch = git_ops.get_current_branch(self.project_path) if self.project_path else ""
-        return project_commands.render(cmd.get("command", ""), self.project_path, branch)
+    def _branch(self):
+        if not self.project_path:
+            return ""
+        return git_ops.get_current_branch(self.project_path)
 
     def _run_command(self, cmd, terminal=False):
         if not self.project_path:
             return
 
-        command = self._render(cmd)
+        rendered = project_commands.render(cmd.get("command", ""), self.project_path, self._branch())
+        if not rendered.strip():
+            return
+
         self._busy = True
+        activity.log_event(self.project_path, "command_run", cmd.get("name", rendered[:80]))
 
-        try:
-            if terminal or cmd.get("use_terminal"):
-                self._run_in_terminal(command)
-                activity.log_event(
-                    self.project_path,
-                    "command_terminal",
-                    f"Opened terminal command: {cmd.get('name', 'Command')}",
-                    {"command": command},
-                )
-            else:
-                ok, out = git_ops.run_custom(self.project_path, command)
-                activity.log_event(
-                    self.project_path,
-                    "command_run" if ok else "command_failed",
-                    f"{cmd.get('name', 'Command')}: {out[:120]}",
-                    {"command": command},
-                )
-        finally:
+        if terminal or cmd.get("use_terminal"):
+            self._open_terminal(rendered)
             self._busy = False
+            return
 
+        ok, out = git_ops.run_custom(self.project_path, rendered)
+        activity.log_event(
+            self.project_path,
+            "command_success" if ok else "command_failed",
+            f"{cmd.get('name', 'Command')}: {(out or '')[:120]}",
+        )
+        self._busy = False
         self.refresh()
 
-    def _run_in_terminal(self, command):
+    def _open_terminal(self, command):
         cwd = self.project_path or os.path.expanduser("~")
-        bash_cmd = f"cd {shlex.quote(cwd)}\n{command}\necho\necho '--- Done. Press Enter to close ---'\nread"
-        term = settings.get("terminal_cmd")
-        for t in [term, "kitty", "x-terminal-emulator", "gnome-terminal", "xterm"]:
+        bash_cmd = (
+            f"cd {shlex.quote(cwd)}\n"
+            f"echo {shlex.quote('Command ready. Press Enter to run:')}\n"
+            f"read -e -i {shlex.quote(command)} -p '$ ' user_cmd\n"
+            "eval \"$user_cmd\"\n"
+            "echo\n"
+            "echo '--- Done. Press Enter to close ---'\n"
+            "read"
+        )
+
+        attempts = [
+            ["kitty", "--hold", "bash", "-lc", bash_cmd],
+            ["x-terminal-emulator", "--", "bash", "-lc", bash_cmd],
+            ["gnome-terminal", "--", "bash", "-lc", bash_cmd],
+            ["xterm", "-e", "bash", "-lc", bash_cmd],
+        ]
+
+        for launch in attempts:
             try:
-                if t == "kitty":
-                    subprocess.Popen(["kitty", "--hold", "bash", "-lc", bash_cmd], cwd=cwd)
-                else:
-                    subprocess.Popen([t, "--", "bash", "-lc", bash_cmd], cwd=cwd)
+                subprocess.Popen(launch, cwd=cwd)
                 return
             except FileNotFoundError:
                 continue
 
     def _copy_command(self, cmd):
-        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        rendered = self._render(cmd)
-        clipboard.set_text(rendered, -1)
+        rendered = project_commands.render(cmd.get("command", ""), self.project_path, self._branch())
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(rendered, -1)
+        activity.log_event(self.project_path, "command_copied", cmd.get("name", rendered[:80]))
 
-        activity.log_event(
-            self.project_path,
-            "command_copied",
-            f"Copied command: {cmd.get('name', 'Command')}",
-            {"command": rendered},
-        )
+    def _command_dialog(self, title, cmd=None):
+        dlg = Gtk.Dialog(title=title, transient_for=self.get_toplevel(), flags=0)
+        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_SAVE, Gtk.ResponseType.OK)
+        dlg.set_default_size(520, 360)
 
-        self.refresh()
-
-    def _toggle_pin(self, cmd):
-        project_commands.set_pinned(self.project_path, cmd["id"], not cmd.get("pinned"))
-        self._changed()
-
-    def _set_default(self, cmd):
-        project_commands.set_default(self.project_path, cmd["id"])
-        self._changed()
-
-    def _move_command(self, cmd, direction):
-        project_commands.move(self.project_path, cmd["id"], direction)
-        self._changed()
-
-    def _delete_command(self, cmd):
-        dlg = Gtk.MessageDialog(transient_for=self.get_toplevel(), flags=0,
-                                message_type=Gtk.MessageType.WARNING,
-                                buttons=Gtk.ButtonsType.YES_NO,
-                                text=f"Delete command '{cmd.get('name', 'Command')}'?")
-        response = dlg.run()
-        dlg.destroy()
-        if response == Gtk.ResponseType.YES:
-            project_commands.remove(self.project_path, cmd["id"])
-            self._changed()
-
-    def _changed(self):
-        self.refresh()
-        if self.on_commands_changed:
-            self.on_commands_changed()
-
-    def _add_command_dialog(self, _):
-        if not self.project_path:
-            return
-        self._command_dialog()
-
-    def _edit_command_dialog(self, cmd):
-        self._command_dialog(cmd)
-
-    def _command_dialog(self, cmd=None):
-        editing = cmd is not None
-        dlg = Gtk.Dialog(title="Edit Project Command" if editing else "Add Project Command",
-                         transient_for=self.get_toplevel(), flags=0)
-        dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-                        Gtk.STOCK_SAVE, Gtk.ResponseType.OK)
-        dlg.set_default_size(540, 330)
         box = dlg.get_content_area()
         box.set_border_width(12)
         box.set_spacing(8)
 
-        grid = Gtk.Grid(column_spacing=10, row_spacing=8)
-        name_entry = Gtk.Entry()
-        name_entry.set_text((cmd or {}).get("name", ""))
-        name_entry.set_placeholder_text("e.g. Run tests")
+        name = Gtk.Entry()
+        name.set_placeholder_text("Name, e.g. Run SentinelIR")
+        name.set_text((cmd or {}).get("name", ""))
+        box.pack_start(Gtk.Label(label="Name:"), False, False, 0)
+        box.pack_start(name, False, False, 0)
+
         command_view = Gtk.TextView()
         command_view.set_monospace(True)
         command_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         command_buf = command_view.get_buffer()
         command_buf.set_text((cmd or {}).get("command", ""))
 
-        terminal_switch = Gtk.Switch()
-        terminal_switch.set_active(bool((cmd or {}).get("use_terminal", False)))
-        pinned_switch = Gtk.Switch()
-        pinned_switch.set_active(bool((cmd or {}).get("pinned", False)))
-        default_switch = Gtk.Switch()
-        default_switch.set_active(bool((cmd or {}).get("default", False)))
-
-        def lbl(text):
-            l = Gtk.Label(label=text); l.set_halign(Gtk.Align.START); return l
-        grid.attach(lbl("Name:"), 0, 0, 1, 1)
-        grid.attach(name_entry, 1, 0, 1, 1)
-        grid.attach(lbl("Terminal:"), 0, 1, 1, 1)
-        grid.attach(terminal_switch, 1, 1, 1, 1)
-        grid.attach(lbl("Pinned:"), 0, 2, 1, 1)
-        grid.attach(pinned_switch, 1, 2, 1, 1)
-        grid.attach(lbl("Default:"), 0, 3, 1, 1)
-        grid.attach(default_switch, 1, 3, 1, 1)
-        box.pack_start(grid, False, False, 0)
-
-        hint = Gtk.Label(label="Variables supported: {project}, {branch}, {name}, {venv}")
-        hint.set_halign(Gtk.Align.START)
-        hint.get_style_context().add_class("dashboard-muted")
-        box.pack_start(hint, False, False, 0)
-
         scroll = Gtk.ScrolledWindow()
-        scroll.set_min_content_height(100)
+        scroll.set_min_content_height(120)
         scroll.add(command_view)
+
+        box.pack_start(Gtk.Label(label="Command:"), False, False, 0)
         box.pack_start(scroll, True, True, 0)
+
+        flags = Gtk.Box(spacing=10)
+        use_terminal = Gtk.CheckButton(label="Run in terminal")
+        use_terminal.set_active(bool((cmd or {}).get("use_terminal")))
+        pinned = Gtk.CheckButton(label="Pin to sidebar")
+        pinned.set_active(bool((cmd or {}).get("pinned")))
+        is_default = Gtk.CheckButton(label="Default")
+        is_default.set_active(bool((cmd or {}).get("default")))
+        flags.pack_start(use_terminal, False, False, 0)
+        flags.pack_start(pinned, False, False, 0)
+        flags.pack_start(is_default, False, False, 0)
+        box.pack_start(flags, False, False, 0)
+
         dlg.show_all()
+        response = dlg.run()
 
-        if dlg.run() == Gtk.ResponseType.OK:
-            start, end = command_buf.get_bounds()
-            name = name_entry.get_text().strip()
-            command = command_buf.get_text(start, end, False).strip()
-            if name and command:
-                if editing:
-                    project_commands.update(
-                        self.project_path, cmd["id"],
-                        name=name, command=command,
-                        use_terminal=terminal_switch.get_active(),
-                        pinned=pinned_switch.get_active(),
-                        default=default_switch.get_active(),
-                    )
-                else:
-                    project_commands.add(
-                        self.project_path, name, command,
-                        use_terminal=terminal_switch.get_active(),
-                        pinned=pinned_switch.get_active(),
-                        is_default=default_switch.get_active(),
-                    )
-                self._changed()
+        start, end = command_buf.get_bounds()
+        data = {
+            "name": name.get_text().strip(),
+            "command": command_buf.get_text(start, end, False).strip(),
+            "use_terminal": use_terminal.get_active(),
+            "pinned": pinned.get_active(),
+            "default": is_default.get_active(),
+        }
         dlg.destroy()
+        return response, data
 
-    def _on_refresh_interval_changed(self, combo):
-        active = combo.get_active_id()
-        try:
-            interval = int(active or 60)
-        except ValueError:
-            interval = 60
-
-        settings.set_value("dashboard_refresh_interval", interval)
-        self._restart_auto_refresh()
-
-
-    def _restart_auto_refresh(self):
-        if self._refresh_source_id:
-            GLib.source_remove(self._refresh_source_id)
-            self._refresh_source_id = None
-
-        interval = int(settings.get("dashboard_refresh_interval") or 0)
-        if interval <= 0:
-            return
-
-        self._refresh_source_id = GLib.timeout_add_seconds(interval, self._auto_refresh_tick)
-
-
-    def _auto_refresh_tick(self):
-        if self.project_path and not self._busy:
-            self.refresh()
-        return True
-
-
-    def start_auto_refresh(self):
-        self._restart_auto_refresh()
-
-
-    def stop_auto_refresh(self):
-        if self._refresh_source_id:
-            GLib.source_remove(self._refresh_source_id)
-            self._refresh_source_id = None
-
-    def _launch_session(self, _=None):
+    def _add_command(self, _=None):
         if not self.project_path:
             return
 
-        win = SessionManagerWindow(self.get_toplevel(), self.project_path)
-        win.show_all()
+        response, data = self._command_dialog("Add Project Command")
+        if response == Gtk.ResponseType.OK and data["command"]:
+            project_commands.add(
+                self.project_path,
+                data["name"] or "New Command",
+                data["command"],
+                data["use_terminal"],
+                data["pinned"],
+                data["default"],
+            )
+            activity.log_event(self.project_path, "command_added", data["name"] or data["command"][:80])
+            self.refresh()
+            self._commands_changed()
+
+    def _edit_command(self, cmd):
+        response, data = self._command_dialog("Edit Project Command", cmd)
+        if response == Gtk.ResponseType.OK and data["command"]:
+            project_commands.update(self.project_path, cmd.get("id"), **data)
+            activity.log_event(self.project_path, "command_edited", data["name"] or data["command"][:80])
+            self.refresh()
+            self._commands_changed()
+
+    def _delete_command(self, cmd):
+        project_commands.remove(self.project_path, cmd.get("id"))
+        activity.log_event(self.project_path, "command_deleted", cmd.get("name", "Command"))
+        self.refresh()
+        self._commands_changed()
+
+    def _toggle_pin(self, cmd):
+        project_commands.update(self.project_path, cmd.get("id"), pinned=not bool(cmd.get("pinned")))
+        self.refresh()
+        self._commands_changed()
+
+    def _set_default(self, cmd):
+        project_commands.set_default(self.project_path, cmd.get("id"))
+        self.refresh()
+        self._commands_changed()
+
+    def _move_command(self, cmd, direction):
+        project_commands.move(self.project_path, cmd.get("id"), direction)
+        self.refresh()
+        self._commands_changed()
+
+    def _commands_changed(self):
+        if self.on_commands_changed:
+            self.on_commands_changed()
+
+    def _refresh_repo_health(self):
+        if not self.project_path:
+            self.repo_health_lbl.set_text("No project selected.")
+            return
+
+        health = repo_health(self.project_path)
+        self.repo_health_lbl.set_text(
+            f"Branch: {health['branch']}\n"
+            f"Changed files: {health['changed']}\n"
+            f"Untracked files: {health['untracked']}\n"
+            f"Ahead/behind: +{health['ahead']} / -{health['behind']}\n"
+            f"Latest commit: {health['latest_commit']}\n"
+            f"Remotes: {health['remotes']}\n"
+            f"Stashes: {health['stashes']}\n"
+            f"Tags: {health['tags']}"
+        )
+
+    def _refresh_activity(self):
+        for child in self.activity_list.get_children():
+            self.activity_list.remove(child)
+
+        if not self.project_path:
+            self._empty_row(self.activity_list, "No project selected.")
+            self.activity_list.show_all()
+            return
+
+        events = activity.recent(self.project_path, limit=8)
+
+        if not events:
+            self._empty_row(self.activity_list, "No activity yet.")
+            self.activity_list.show_all()
+            return
+
+        for event in events:
+            row = Gtk.ListBoxRow()
+            row.set_selectable(False)
+            msg = f"{event.get('timestamp', '')[-8:]}  {event.get('message', '')}"
+            lbl = Gtk.Label(label=msg)
+            lbl.set_halign(Gtk.Align.START)
+            lbl.set_ellipsize(Pango.EllipsizeMode.END)
+            lbl.get_style_context().add_class("dashboard-muted")
+            lbl.set_margin_top(3)
+            lbl.set_margin_bottom(3)
+            row.add(lbl)
+            self.activity_list.add(row)
+
+        self.activity_list.show_all()
+
+    def _refresh_metrics(self):
+        if not self.project_path:
+            self.metrics_lbl.set_text("No metrics yet.")
+            return
+
+        m = activity.metrics(self.project_path, days=7)
+        self.metrics_lbl.set_text(
+            f"Last 7 days:\n"
+            f"Commits: {m.get('commits', 0)}\n"
+            f"Pushes: {m.get('pushes', 0)}\n"
+            f"Commands: {m.get('commands', 0)}\n"
+            f"Checklists: {m.get('checklists', 0)}\n"
+            f"Code reviews: {m.get('code_reviews', 0)}"
+        )
+
+
+def _run(path, command):
+    ok, out = git_ops.run_custom(path, command)
+    return out.strip() if ok and out else ""
+
+
+def repo_health(path):
+    branch = git_ops.get_current_branch(path)
+    status = git_ops.get_status(path) or ""
+    lines = status.splitlines()
+
+    changed = len(lines)
+    untracked = sum(1 for line in lines if line.startswith("??"))
+
+    ahead = 0
+    behind = 0
+    raw = _run(path, "git rev-list --left-right --count @{u}...HEAD 2>/dev/null")
+    if raw:
+        try:
+            behind, ahead = [int(x) for x in raw.split()[:2]]
+        except Exception:
+            ahead, behind = 0, 0
+
+    latest = _run(path, "git log -1 --pretty=%s") or "No commits"
+    remotes = _run(path, "git remote") or "none"
+    stashes_raw = _run(path, "git stash list")
+    stashes = len(stashes_raw.splitlines()) if stashes_raw else 0
+    tags_raw = _run(path, "git tag")
+    tags = len(tags_raw.splitlines()) if tags_raw else 0
+
+    return {
+        "branch": branch,
+        "changed": changed,
+        "untracked": untracked,
+        "ahead": ahead,
+        "behind": behind,
+        "latest_commit": latest,
+        "remotes": ", ".join(remotes.splitlines()) if remotes != "none" else "none",
+        "stashes": stashes,
+        "tags": tags,
+    }
+
+
+# ── Multi-Commit project command safety patch ───────────────────────────────
+try:
+    from gi.repository import Gtk
+    from core import command_safety
+except Exception:
+    Gtk = None
+    command_safety = None
+
+
+def _mc_dashboard_confirm_risky_command(self, command):
+    if Gtk is None or command_safety is None:
+        return True
+
+    if not command_safety.is_dangerous(command):
+        return True
+
+    dlg = Gtk.MessageDialog(
+        transient_for=self.get_toplevel(),
+        flags=0,
+        message_type=Gtk.MessageType.WARNING,
+        buttons=Gtk.ButtonsType.YES_NO,
+        text="Risky project command detected"
+    )
+    dlg.format_secondary_text(command_safety.warning_text(command))
+    response = dlg.run()
+    dlg.destroy()
+    return response == Gtk.ResponseType.YES
+
+
+if not getattr(ProjectDashboard, "_mc_project_command_safety_patch_applied", False):
+    ProjectDashboard._mc_base_run_command = getattr(ProjectDashboard, "_run_command", None)
+
+    def _mc_safe_run_command(self, cmd, terminal=False):
+        command = ""
+
+        try:
+            command = self._render(cmd)
+        except Exception:
+            command = cmd.get("command", "") if isinstance(cmd, dict) else ""
+
+        if command and not self._mc_dashboard_confirm_risky_command(command):
+            try:
+                activity.log_event(self.project_path, "command_cancelled", f"Cancelled risky command: {cmd.get('name', command[:60])}")
+                self.refresh()
+            except Exception:
+                pass
+            return
+
+        if ProjectDashboard._mc_base_run_command:
+            return ProjectDashboard._mc_base_run_command(self, cmd, terminal=terminal)
+
+    ProjectDashboard._run_command = _mc_safe_run_command
+    ProjectDashboard._mc_dashboard_confirm_risky_command = _mc_dashboard_confirm_risky_command
+    ProjectDashboard._mc_project_command_safety_patch_applied = True
+

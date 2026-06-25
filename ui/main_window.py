@@ -17,6 +17,12 @@ from core import update_manager, activity
 from ui.code_review_manager import CodeReviewManagerWindow
 from ui.table_lab import TableLabWindow
 
+from ui.diagnostics_window import DiagnosticsWindow
+
+from ui.handoff_generator import HandoffGeneratorWindow
+
+from core import command_safety
+
 ICON_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "icon.png")
 
 class MainWindow(Gtk.Window):
@@ -545,3 +551,83 @@ class MainWindow(Gtk.Window):
             self.statusbar.push(0, f"✅ Restored backup: {', '.join(restored)}")
         except Exception as e:
             self.statusbar.push(0, f"❌ Restore failed: {e}")
+
+
+# ── Multi-Commit power tools menu patch ─────────────────────────────────────
+def _mc_current_project_path(self):
+    try:
+        return self.commit_panel.project_path
+    except Exception:
+        return None
+
+
+def _mc_open_diagnostics(self, _=None):
+    win = DiagnosticsWindow(self, self._mc_current_project_path())
+    win.present()
+
+
+def _mc_open_handoff_generator(self, _=None):
+    path = self._mc_current_project_path()
+
+    if not path:
+        try:
+            self.statusbar.push(0, "❌ Select a project before opening Handoff Generator.")
+        except Exception:
+            pass
+        return
+
+    win = HandoffGeneratorWindow(self, path)
+    win.present()
+
+
+def _mc_show_command_safety_guide(self, _=None):
+    dlg = Gtk.MessageDialog(
+        transient_for=self,
+        flags=0,
+        message_type=Gtk.MessageType.INFO,
+        buttons=Gtk.ButtonsType.OK,
+        text="Command Safety Guardrails"
+    )
+    dlg.format_secondary_text(command_safety.safety_guide())
+    dlg.run()
+    dlg.destroy()
+
+
+def _mc_power_menu_item(label, callback):
+    item = Gtk.MenuItem(label=label)
+    item.connect("activate", callback)
+    return item
+
+
+if not getattr(MainWindow, "_mc_power_tools_patch_applied", False):
+    MainWindow._mc_base_build_menubar = MainWindow._build_menubar
+
+    def _mc_build_menubar(self):
+        menubar = MainWindow._mc_base_build_menubar(self)
+
+        menu = Gtk.Menu()
+        root = Gtk.MenuItem(label="Power Tools")
+        root.set_submenu(menu)
+
+        menu.append(_mc_power_menu_item("🩺 Diagnostics / Compile Check", self._mc_open_diagnostics))
+        menu.append(_mc_power_menu_item("📘 Handoff Generator", self._mc_open_handoff_generator))
+        menu.append(_mc_power_menu_item("🛡 Command Safety Guide", self._mc_show_command_safety_guide))
+
+        try:
+            menu.append(Gtk.SeparatorMenuItem())
+            menu.append(_mc_power_menu_item("🧪 Create Live Test Update", self._create_test_update_popup))
+            menu.append(_mc_power_menu_item("Clear Test Update", self._clear_test_update))
+        except Exception:
+            pass
+
+        menu.show_all()
+        menubar.append(root)
+        return menubar
+
+    MainWindow._build_menubar = _mc_build_menubar
+    MainWindow._mc_current_project_path = _mc_current_project_path
+    MainWindow._mc_open_diagnostics = _mc_open_diagnostics
+    MainWindow._mc_open_handoff_generator = _mc_open_handoff_generator
+    MainWindow._mc_show_command_safety_guide = _mc_show_command_safety_guide
+    MainWindow._mc_power_tools_patch_applied = True
+
