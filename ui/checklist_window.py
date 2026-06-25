@@ -4,7 +4,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Pango, Gdk
 
-from core import checklists, activity
+from core import checklists, activity, settings
 
 
 class ChecklistWindow(Gtk.Window):
@@ -15,6 +15,7 @@ class ChecklistWindow(Gtk.Window):
         # Not transient — so this window survives hiding/minimizing the main window
         self.set_default_size(640, 480)
         self.set_size_request(260, 200)
+        self._restore_window_geometry()
         self.project_path = os.path.abspath(os.path.expanduser(project_path))
         self.project_data = checklists.get_project_data(project_path)
 
@@ -1211,10 +1212,61 @@ Rules:
             self.parent_window.present()
             btn.set_label("🙈 Hide Main Window")
 
+    def _restore_window_geometry(self):
+        """
+        Restore the last Checklist window position and size.
+
+        This lets the Checklist reopen where the user last placed it,
+        including a second monitor / gTile layout.
+        """
+        geom = settings.get("checklist_window_geometry") or {}
+
+        try:
+            width = int(geom.get("width", 640))
+            height = int(geom.get("height", 480))
+            self.set_default_size(max(320, width), max(240, height))
+
+            x = geom.get("x")
+            y = geom.get("y")
+
+            if x is not None and y is not None:
+                self.move(int(x), int(y))
+
+        except Exception:
+            # Fallback to normal default size if stored geometry is invalid.
+            self.set_default_size(640, 480)
+
+    def _save_window_geometry(self):
+        """
+        Save the current Checklist window position and size.
+
+        GTK coordinates are global screen coordinates, so this should preserve
+        second-monitor positions too.
+        """
+        try:
+            x, y = self.get_position()
+            width, height = self.get_size()
+
+            if width < 200 or height < 150:
+                return
+
+            settings.set_value("checklist_window_geometry", {
+                "x": int(x),
+                "y": int(y),
+                "width": int(width),
+                "height": int(height),
+            })
+
+        except Exception:
+            pass
+
+
     def _on_close(self, window, event):
         """Warn before closing if there are unsaved changes.
         Return False to allow close, True to cancel close.
         """
+        self._save_window_geometry()
+
         if not self._dirty:
             self._restore_main_window_if_hidden()
             return False
