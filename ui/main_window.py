@@ -30,6 +30,8 @@ class MainWindow(Gtk.Window):
         self._appearance_win  = None
         self._code_review_manager_win = None
         self._table_lab_win = None
+        self._update_prompt_win = None
+        self._last_update_popup_id = None
 
         try:
             self.set_icon_from_file(os.path.abspath(ICON_PATH))
@@ -85,6 +87,7 @@ class MainWindow(Gtk.Window):
         self.connect("delete-event", self._on_main_delete_event)
 
         GLib.timeout_add(1200, self._startup_update_check)
+        GLib.timeout_add_seconds(3, self._realtime_update_check)
 
     def _save_main_pane_positions(self, *_):
         """Remember main splitter positions between launches."""
@@ -147,6 +150,8 @@ class MainWindow(Gtk.Window):
         menubar.append(self._menu("Help", [
             ("Check for Updates",    self._manual_update_check),
             ("Preview Update Popup", self._preview_update_popup),
+            ("🧪 Create Test Update", self._create_test_update_popup),
+            ("Clear Test Update", self._clear_test_update),
             None,
             ("Keyboard Shortcuts",   self._show_shortcuts),
             ("About Multi-Commit",   self._show_about),
@@ -344,6 +349,65 @@ class MainWindow(Gtk.Window):
         win = UpdateCenterWindow(self)
         win.present()
 
+    def _realtime_update_check(self):
+        """
+        Poll for real/test updates while Multi-Commit is already open.
+
+        This lets a fake update be created from another terminal and the popup
+        appears without restarting the app.
+        """
+        try:
+            info = update_manager.check_for_update()
+            if not info.get("available"):
+                return True
+
+            update_id = (
+                info.get("id")
+                or f"{info.get('latest', 'remote')}-{info.get('behind', 0)}"
+            )
+
+            if update_id == self._last_update_popup_id:
+                return True
+
+            self._last_update_popup_id = update_id
+            self._show_update_prompt(info)
+
+            try:
+                self.statusbar.push(0, "🔄 Update available: " + info.get("message", ""))
+            except Exception:
+                pass
+
+        except Exception as e:
+            try:
+                self.statusbar.push(0, f"Update watcher skipped: {e}")
+            except Exception:
+                pass
+
+        return True
+
+
+    def _create_test_update_popup(self, _=None):
+        info = update_manager.create_test_update(
+            "Live test update created — this popup appeared while the app was open."
+        )
+        self._last_update_popup_id = None
+        self._show_update_prompt(info)
+
+        try:
+            self.statusbar.push(0, "🧪 Test update created.")
+        except Exception:
+            pass
+
+
+    def _clear_test_update(self, _=None):
+        update_manager.clear_test_update()
+        self._last_update_popup_id = None
+
+        try:
+            self.statusbar.push(0, "Test update cleared.")
+        except Exception:
+            pass
+
     def _startup_update_check(self):
         try:
             info = update_manager.check_for_update()
@@ -378,7 +442,16 @@ class MainWindow(Gtk.Window):
         self._show_update_prompt(info)
 
     def _show_update_prompt(self, info):
+        try:
+            if self._update_prompt_win is not None and self._update_prompt_win.get_visible():
+                self._update_prompt_win.present_top_right()
+                return
+        except Exception:
+            self._update_prompt_win = None
+
         popup = UpdatePromptWindow(self, info)
+        self._update_prompt_win = popup
+        popup.connect("destroy", lambda *_: setattr(self, "_update_prompt_win", None))
         popup.present_top_right()
 
     def _show_about(self, _=None):

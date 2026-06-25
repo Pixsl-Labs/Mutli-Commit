@@ -235,6 +235,8 @@ class UpdateCenterWindow(Gtk.Window):
                 if result.get("ok") and result.get("restart"):
                     self.status_lbl.set_text("✅ Updated. Restart Multi-Commit to use the new version.")
                     self._ask_restart()
+                elif result.get("ok"):
+                    self.status_lbl.set_text("✅ " + result.get("message", "Update applied."))
                 else:
                     self.status_lbl.set_text("❌ Update not applied.")
                 return False

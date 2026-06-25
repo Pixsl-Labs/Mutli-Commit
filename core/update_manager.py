@@ -8,6 +8,7 @@ Safe design:
 - Release builder creates annotated tags and optional push.
 """
 import os
+import json
 import sys
 import subprocess
 from datetime import datetime, timedelta
@@ -287,3 +288,98 @@ def create_release(version, notes, push=False):
         "version": version,
         "message": f"Release tag {version} created" + (" and pushed." if push else "."),
     }
+
+
+# ── Multi-Commit realtime test update patch ─────────────────────────────────
+#
+# This creates a local fake update event for testing the update popup while the
+# app is already open. It does NOT pull code or change Git history.
+
+TEST_UPDATE_FILE = os.path.join(
+    getattr(settings, "CONFIG_DIR", os.path.expanduser("~/.config/multi-commit")),
+    "test_update_available.json"
+)
+
+
+def _test_update_now_id():
+    return datetime.now().strftime("test-%Y%m%d-%H%M%S")
+
+
+def create_test_update(message=None):
+    os.makedirs(os.path.dirname(TEST_UPDATE_FILE), exist_ok=True)
+
+    payload = {
+        "id": _test_update_now_id(),
+        "created": datetime.now().isoformat(timespec="seconds"),
+        "current": APP_VERSION,
+        "latest": "vTEST-LIVE",
+        "behind": 1,
+        "branch": _current_branch(),
+        "message": message or "Live test update available — popup should appear while app is open.",
+    }
+
+    with open(TEST_UPDATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    return test_update_info()
+
+
+def clear_test_update():
+    try:
+        if os.path.exists(TEST_UPDATE_FILE):
+            os.remove(TEST_UPDATE_FILE)
+    except Exception:
+        pass
+
+
+def test_update_info():
+    if not os.path.exists(TEST_UPDATE_FILE):
+        return None
+
+    try:
+        with open(TEST_UPDATE_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return None
+
+    return {
+        "available": True,
+        "test": True,
+        "id": payload.get("id") or _test_update_now_id(),
+        "current": payload.get("current", APP_VERSION),
+        "latest": payload.get("latest", "vTEST-LIVE"),
+        "branch": payload.get("branch", _current_branch()),
+        "behind": int(payload.get("behind", 1)),
+        "message": payload.get("message", "Live test update available."),
+    }
+
+
+_mc_original_check_for_update = check_for_update
+_mc_original_apply_update = apply_update
+
+
+def check_for_update(force_preview=False):
+    if force_preview:
+        return _mc_original_check_for_update(force_preview=True)
+
+    test_info = test_update_info()
+    if test_info:
+        return test_info
+
+    return _mc_original_check_for_update(force_preview=False)
+
+
+def apply_update():
+    test_info = test_update_info()
+
+    if test_info:
+        clear_test_update()
+        return {
+            "ok": True,
+            "message": "Test update applied/cleared. Real updater was not run.",
+            "restart": False,
+            "test": True,
+        }
+
+    return _mc_original_apply_update()
+
