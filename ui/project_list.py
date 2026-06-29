@@ -4,7 +4,7 @@ import subprocess
 import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Pango, Gdk
-from core import project_groups, project_commands, settings
+from core import project_groups, project_commands, settings, vscode_reset
 from core.git_ops import is_git_repo, get_status, get_current_branch, run_custom
 from ui.checklist_window import ChecklistWindow
 from ui.session_manager import SessionManagerWindow
@@ -405,6 +405,7 @@ class ProjectListPanel(Gtk.Box):
 
         add("📁 Open Folder", lambda _: self._open_folder(path))
         add("💻 Open in VSCode", lambda _: self._open_vscode(path))
+        add("🧹 Reset VSCode", lambda _: self._reset_vscode(path))
         add("🖥 Open Terminal", lambda _: self._open_terminal(path))
         add("✅ Open Checklist", lambda _: self._open_checklist(path))
         add("📋 Generate Code Review", lambda _: self._code_review(path))
@@ -564,4 +565,89 @@ if not getattr(ProjectListPanel, "_mc_pinned_command_safety_patch_applied", Fals
     ProjectListPanel._run_pinned_command = _mc_safe_run_pinned_command
     ProjectListPanel._mc_project_list_confirm_risky_command = _mc_project_list_confirm_risky_command
     ProjectListPanel._mc_pinned_command_safety_patch_applied = True
+
+
+# ── Multi-Commit reset VSCode project action ────────────────────────────────
+def _mc_reset_vscode(self, project_path):
+    """
+    Reset VSCode's remembered open editors/layout for this project.
+
+    This moves matching VSCode workspaceStorage folders to a Multi-Commit
+    backup folder, then opens the project folder in a new VSCode window.
+    """
+    project_name = os.path.basename(project_path.rstrip("/")) or project_path
+
+    first = Gtk.MessageDialog(
+        transient_for=self.get_toplevel(),
+        flags=0,
+        message_type=Gtk.MessageType.WARNING,
+        buttons=Gtk.ButtonsType.YES_NO,
+        text=f"Reset VSCode for {project_name}?"
+    )
+    first.format_secondary_text(
+        "This clears VSCode's remembered open tabs/layout for this project only.\n\n"
+        "It does NOT delete project files.\n"
+        "It does NOT touch Git.\n\n"
+        "Best result: close existing VSCode windows for this project first."
+    )
+    r1 = first.run()
+    first.destroy()
+
+    if r1 != Gtk.ResponseType.YES:
+        return
+
+    second = Gtk.MessageDialog(
+        transient_for=self.get_toplevel(),
+        flags=0,
+        message_type=Gtk.MessageType.WARNING,
+        buttons=Gtk.ButtonsType.YES_NO,
+        text="Are you absolutely sure?"
+    )
+    second.format_secondary_text(
+        "Multi-Commit will move VSCode workspace/session state into a backup, "
+        "then reopen this folder in a clean VSCode window."
+    )
+    r2 = second.run()
+    second.destroy()
+
+    if r2 != Gtk.ResponseType.YES:
+        return
+
+    try:
+        result = vscode_reset.reset_project_workspace(project_path)
+        opened = vscode_reset.open_clean_vscode(project_path)
+
+        msg = (
+            f"Matched VSCode workspace state folders: {result.get('matched', 0)}\n"
+            f"Backup folder:\n{result.get('backup_root')}\n\n"
+            f"VSCode opened: {'yes' if opened else 'no'}"
+        )
+
+        info = Gtk.MessageDialog(
+            transient_for=self.get_toplevel(),
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text="VSCode reset complete"
+        )
+        info.format_secondary_text(msg)
+        info.run()
+        info.destroy()
+
+    except Exception as e:
+        err = Gtk.MessageDialog(
+            transient_for=self.get_toplevel(),
+            flags=0,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK,
+            text="VSCode reset failed"
+        )
+        err.format_secondary_text(str(e))
+        err.run()
+        err.destroy()
+
+
+if not getattr(ProjectListPanel, "_mc_reset_vscode_patch_applied", False):
+    ProjectListPanel._reset_vscode = _mc_reset_vscode
+    ProjectListPanel._mc_reset_vscode_patch_applied = True
 
