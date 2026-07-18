@@ -23,12 +23,16 @@ from ui.handoff_generator import HandoffGeneratorWindow
 
 from core import command_safety
 
+from ui.focus_window import FocusWindow
+
+from ui.project_templates_window import ProjectTemplatesWindow
+
 ICON_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "icon.png")
 
 class MainWindow(Gtk.Window):
     def __init__(self):
-        super().__init__(title="Multi-Commit")
-        self.set_wmclass("multi-commit", "Multi-Commit")
+        super().__init__(title="DevWise")
+        self.set_wmclass("devwise", "DevWise")
         self.set_default_size(960, 640)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_border_width(0)
@@ -160,7 +164,7 @@ class MainWindow(Gtk.Window):
             ("Clear Test Update", self._clear_test_update),
             None,
             ("Keyboard Shortcuts",   self._show_shortcuts),
-            ("About Multi-Commit",   self._show_about),
+            ("About DevWise",   self._show_about),
         ]))
 
         menubar.append(self._menu("Updates", [
@@ -449,7 +453,7 @@ class MainWindow(Gtk.Window):
             flags=0,
             message_type=Gtk.MessageType.INFO,
             buttons=Gtk.ButtonsType.OK,
-            text="Multi-Commit is up to date"
+            text="DevWise is up to date"
         )
         dlg.format_secondary_text(info.get("message", "No update available."))
         dlg.run()
@@ -475,10 +479,10 @@ class MainWindow(Gtk.Window):
     def _show_about(self, _=None):
         dlg = Gtk.AboutDialog()
         dlg.set_transient_for(self)
-        dlg.set_program_name("Multi-Commit")
+        dlg.set_program_name("DevWise")
         dlg.set_version("1.0.0")
         dlg.set_comments("Git GUI for multiple remotes on Linux")
-        dlg.set_website("https://github.com/Pixsl-Labs/Multi-Commit")
+        dlg.set_website("https://github.com/Pixsl-Labs/DevWise")
         dlg.set_authors(["Sam (Pixsl-Labs)"])
         try:
             dlg.set_logo(GdkPixbuf.Pixbuf.new_from_file_at_size(
@@ -498,7 +502,7 @@ class MainWindow(Gtk.Window):
 
     def _export_config_backup(self, _=None):
         dlg = Gtk.FileChooserDialog(
-            title="Export Multi-Commit Config Backup",
+            title="Export DevWise Config Backup",
             transient_for=self,
             action=Gtk.FileChooserAction.SAVE,
             buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
@@ -506,7 +510,7 @@ class MainWindow(Gtk.Window):
         )
         dlg.set_do_overwrite_confirmation(True)
         dlg.set_current_folder(os.path.expanduser("~/Projects"))
-        dlg.set_current_name("multi-commit-backup.zip")
+        dlg.set_current_name("devwise-backup.zip")
 
         if dlg.run() == Gtk.ResponseType.OK:
             try:
@@ -520,7 +524,7 @@ class MainWindow(Gtk.Window):
 
     def _restore_config_backup(self, _=None):
         dlg = Gtk.FileChooserDialog(
-            title="Restore Multi-Commit Config Backup",
+            title="Restore DevWise Config Backup",
             transient_for=self,
             action=Gtk.FileChooserAction.OPEN,
             buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
@@ -547,8 +551,8 @@ class MainWindow(Gtk.Window):
             text="Restore config backup?"
         )
         confirm.format_secondary_text(
-            "This will overwrite current Multi-Commit settings, projects, commands, checklists and notes.\n\n"
-            "Restart Multi-Commit after restoring."
+            "This will overwrite current DevWise settings, projects, commands, checklists and notes.\n\n"
+            "Restart DevWise after restoring."
         )
 
         response = confirm.run()
@@ -565,7 +569,7 @@ class MainWindow(Gtk.Window):
             self.statusbar.push(0, f"❌ Restore failed: {e}")
 
 
-# ── Multi-Commit power tools menu patch ─────────────────────────────────────
+# ── DevWise power tools menu patch ─────────────────────────────────────
 def _mc_current_project_path(self):
     try:
         return self.commit_panel.project_path
@@ -642,4 +646,53 @@ if not getattr(MainWindow, "_mc_power_tools_patch_applied", False):
     MainWindow._mc_open_handoff_generator = _mc_open_handoff_generator
     MainWindow._mc_show_command_safety_guide = _mc_show_command_safety_guide
     MainWindow._mc_power_tools_patch_applied = True
+
+
+# ── DevWise workflow menu patch ─────────────────────────────────────────────
+def _dw_current_project_path(self):
+    try:
+        return self.commit_panel.project_path
+    except Exception:
+        return None
+
+
+def _dw_open_focus_mode(self, _=None):
+    path = self._dw_current_project_path()
+    win = FocusWindow(self, path)
+    win.present()
+
+
+def _dw_open_project_templates(self, _=None):
+    path = self._dw_current_project_path()
+    win = ProjectTemplatesWindow(self, path)
+    win.present()
+
+
+if not getattr(MainWindow, "_dw_workflow_menu_patch_applied", False):
+    MainWindow._dw_base_build_menubar = MainWindow._build_menubar
+
+    def _dw_build_menubar(self):
+        menubar = MainWindow._dw_base_build_menubar(self)
+
+        menu = Gtk.Menu()
+        root = Gtk.MenuItem(label="Workflows")
+        root.set_submenu(menu)
+
+        focus = Gtk.MenuItem(label="🎯 Focus Mode")
+        focus.connect("activate", self._dw_open_focus_mode)
+        menu.append(focus)
+
+        templates = Gtk.MenuItem(label="🧩 Project Templates")
+        templates.connect("activate", self._dw_open_project_templates)
+        menu.append(templates)
+
+        menu.show_all()
+        menubar.append(root)
+        return menubar
+
+    MainWindow._build_menubar = _dw_build_menubar
+    MainWindow._dw_current_project_path = _dw_current_project_path
+    MainWindow._dw_open_focus_mode = _dw_open_focus_mode
+    MainWindow._dw_open_project_templates = _dw_open_project_templates
+    MainWindow._dw_workflow_menu_patch_applied = True
 

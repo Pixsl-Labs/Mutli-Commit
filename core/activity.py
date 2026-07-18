@@ -117,3 +117,26 @@ def clear(project_path=None):
     key = _norm(project_path)
     events = [e for e in load_all() if e.get("project_path") != key]
     save_all(events)
+
+# ── Dashboard helpers ───────────────────────────────────────────────────────
+
+def summary_text(project_path=None, days=7):
+    """Return a compact text summary for dashboard display."""
+    m = metrics(project_path, days=days)
+    return (
+        f"Last {days} days:\n"
+        f"Commits: {m.get('commits', 0)}\n"
+        f"Pushes: {m.get('pushes', 0)}\n"
+        f"Commands: {m.get('commands', 0)}\n"
+        f"Checklists: {m.get('checklists', 0)}\n"
+        f"Code reviews: {m.get('code_reviews', 0)}\n"
+        f"Backups/updates: {m.get('config_backups', 0)} / {m.get('updates', 0)}"
+    )
+
+
+def log_code_review(project_path, output_path):
+    return log_event(project_path, "code_review_generated", f"Generated code review: {output_path}")
+
+
+def log_config_backup(output_path):
+    return log_event("", "config_backup_exported", f"Exported config backup: {output_path}")

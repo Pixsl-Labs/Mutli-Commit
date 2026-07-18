@@ -45,3 +45,52 @@ def is_git_repo(path):
 def get_status(path):
     ok, out = _run("git status --short", path)
     return out if ok else ""
+
+# ── Repo health helpers ─────────────────────────────────────────────────────
+
+def get_ahead_behind(path):
+    """Return (ahead, behind) compared with upstream, safely."""
+    ok, out = _run("git rev-list --left-right --count @{u}...HEAD 2>/dev/null", path)
+    if not ok or not out:
+        return 0, 0
+    try:
+        behind, ahead = [int(x) for x in out.split()[:2]]
+        return ahead, behind
+    except Exception:
+        return 0, 0
+
+
+def get_latest_commit_subject(path):
+    ok, out = _run("git log -1 --pretty=%s", path)
+    return out if ok and out else "No commits"
+
+
+def get_untracked_count(path):
+    status = get_status(path)
+    return sum(1 for line in status.splitlines() if line.startswith("??")) if status else 0
+
+
+def get_stash_count(path):
+    ok, out = _run("git stash list", path)
+    return len(out.splitlines()) if ok and out else 0
+
+
+def get_tag_count(path):
+    ok, out = _run("git tag", path)
+    return len(out.splitlines()) if ok and out else 0
+
+
+def get_repo_health(path):
+    status = get_status(path)
+    ahead, behind = get_ahead_behind(path)
+    return {
+        "branch": get_current_branch(path),
+        "changed": len(status.splitlines()) if status else 0,
+        "untracked": get_untracked_count(path),
+        "ahead": ahead,
+        "behind": behind,
+        "latest_commit": get_latest_commit_subject(path),
+        "remotes": get_remotes(path),
+        "stashes": get_stash_count(path),
+        "tags": get_tag_count(path),
+    }

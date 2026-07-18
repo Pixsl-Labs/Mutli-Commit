@@ -257,3 +257,155 @@ def delete_project_data(project_path: str):
     if key in data:
         del data[key]
         save_all(data)
+
+
+# ── DevWise Branch/Issue checklist parser patch ─────────────────────────────
+# Adds backwards-compatible support for:
+# # Branch: feat/example
+# ## Issue: Build thing
+# - Task
+# Descript: details
+
+_dw_base_parse_markdown_roadmap = parse_markdown_roadmap
+_dw_base_export_markdown = export_markdown
+
+
+def _dw_strip_checkbox(text):
+    import re
+    return re.sub(r"^\s*\[[ xX]\]\s*", "", str(text or "")).strip()
+
+
+def parse_markdown_roadmap(markdown_text):
+    import re
+
+    text = markdown_text or ""
+
+    if not re.search(r"^\s*#{1,6}\s*(Branch|Issue)\s*:", text, flags=re.I | re.M):
+        return _dw_base_parse_markdown_roadmap(text)
+
+    stages = []
+    current_branch = ""
+    current_stage = None
+    last_item = None
+    desc_mode = False
+
+    def ensure_stage(title="General"):
+        nonlocal current_stage
+        if current_stage is None:
+            current_stage = new_stage(title)
+            current_stage["branch"] = current_branch
+            stages.append(current_stage)
+        return current_stage
+
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+
+        if not stripped:
+            desc_mode = False
+            continue
+
+        branch_match = re.match(r"^\s*#{1,6}\s*Branch\s*:\s*(.+)$", stripped, flags=re.I)
+        if branch_match:
+            current_branch = branch_match.group(1).strip()
+            current_stage = None
+            last_item = None
+            desc_mode = False
+            continue
+
+        issue_match = re.match(r"^\s*#{1,6}\s*Issue\s*:\s*(.+)$", stripped, flags=re.I)
+        if issue_match:
+            issue_title = issue_match.group(1).strip()
+            current_stage = new_stage(issue_title)
+            current_stage["branch"] = current_branch
+            current_stage["issue"] = issue_title
+            stages.append(current_stage)
+            last_item = None
+            desc_mode = False
+            continue
+
+        heading = re.match(r"^\s*#{1,6}\s+(.+)$", stripped)
+        if heading:
+            title = heading.group(1).strip()
+            current_stage = new_stage(title)
+            current_stage["branch"] = current_branch
+            stages.append(current_stage)
+            last_item = None
+            desc_mode = False
+            continue
+
+        notes_match = re.match(r"^\s*Notes\s*:\s*(.*)$", stripped, flags=re.I)
+        if notes_match:
+            stage = ensure_stage()
+            stage["notes"] = notes_match.group(1).strip()
+            last_item = None
+            desc_mode = False
+            continue
+
+        descript_match = re.match(r"^\s*Descript\s*:\s*(.*)$", stripped, flags=re.I)
+        if descript_match and last_item is not None:
+            last_item["description"] = descript_match.group(1).strip()
+            desc_mode = True
+            continue
+
+        bullet = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+)$", stripped)
+        if bullet:
+            stage = ensure_stage()
+            task_text = _dw_strip_checkbox(bullet.group(1))
+            if task_text:
+                last_item = new_item(task_text)
+                stage.setdefault("items", []).append(last_item)
+            desc_mode = False
+            continue
+
+        if desc_mode and last_item is not None:
+            current = last_item.get("description", "").strip()
+            last_item["description"] = (current + "\n" + stripped).strip() if current else stripped
+            continue
+
+        # Fallback: useful plain lines become tasks inside current issue/stage.
+        if current_stage is not None:
+            last_item = new_item(_dw_strip_checkbox(stripped))
+            current_stage.setdefault("items", []).append(last_item)
+            desc_mode = False
+
+    return stages
+
+
+def export_markdown(project_path, project_name="Project"):
+    data = get_project_data(project_path)
+    stages = data.get("stages", [])
+
+    lines = [f"# {project_name} Checklist", ""]
+
+    last_branch = object()
+
+    for stage in stages:
+        branch = stage.get("branch", "")
+        issue = stage.get("issue", "")
+
+        if branch and branch != last_branch:
+            lines.extend([f"# Branch: {branch}", ""])
+            last_branch = branch
+
+        if issue:
+            lines.append(f"## Issue: {issue}")
+        else:
+            lines.append(f"# {stage.get('title', 'Untitled Stage')}")
+
+        notes = stage.get("notes", "").strip()
+        if notes:
+            lines.append(f"Notes: {notes}")
+
+        lines.append("")
+
+        for item in stage.get("items", []):
+            box = "x" if item.get("done") else " "
+            lines.append(f"- [{box}] {item.get('text', '')}")
+            desc = item.get("description", "").strip()
+            if desc:
+                lines.append(f"Descript: {desc}")
+            lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=DevWise
+GenericName=Project Cockpit
+Comment=Local project cockpit for Git, checklists, sessions and code reviews
+Exec=python3 /home/sam/Projects/DevWise/main.py
+Icon=/home/sam/Projects/devwise/assets/icon.png
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+Keywords=git;commit;push;github;
+StartupNotify=true
+StartupWMClass=devwise

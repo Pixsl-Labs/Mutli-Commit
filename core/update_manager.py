@@ -14,7 +14,7 @@ import subprocess
 from datetime import datetime, timedelta
 from core import settings
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 

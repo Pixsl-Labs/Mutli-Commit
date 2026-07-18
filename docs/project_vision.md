@@ -1,4 +1,4 @@
-Multi-Commit Vision
+DevWise Vision
 
 Purpose:
 A Linux desktop productivity tool that acts as a project cockpit.

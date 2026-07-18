@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Multi-Commit — GTK Git GUI for Linux"""
+"""DevWise — GTK Git GUI for Linux"""
 import sys
 import gi
 gi.require_version("Gtk", "3.0")

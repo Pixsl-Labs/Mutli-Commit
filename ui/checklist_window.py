@@ -1418,25 +1418,31 @@ Rules:
         return False
 
 
-# ── Multi-Commit checklist resume patch ─────────────────────────────────────
+# ── Multi-Commit checklist resume patch v2 ──────────────────────────────────
 #
-# Stores UI-only checklist resume state in settings.json, separate from the
-# actual checklist data. This avoids marking tasks dirty just because the user
-# clicked around.
+# Fixes previous behaviour where the first auto-selected stage overwrote the
+# saved resume position during window startup.
 
-def _mc_checklist_resume_key(self):
+def _mc_resume_key(self):
     try:
         return os.path.abspath(os.path.expanduser(self.project_path))
     except Exception:
         return ""
 
 
-def _mc_checklist_get_resume_store():
+def _mc_resume_store():
     store = settings.get("checklist_resume_state") or {}
     return store if isinstance(store, dict) else {}
 
 
-def _mc_checklist_selected_indexes(self):
+def _mc_save_resume(self):
+    if getattr(self, "_mc_resume_suppress_save", False):
+        return
+
+    key = self._mc_resume_key()
+    if not key:
+        return
+
     stage_index = getattr(self, "selected_stage_index", None)
     item_index = getattr(self, "selected_item_index", None)
 
@@ -1454,35 +1460,23 @@ def _mc_checklist_selected_indexes(self):
     except Exception:
         pass
 
-    return stage_index, item_index
-
-
-def _mc_checklist_save_resume_selection(self):
-    if getattr(self, "_mc_restoring_resume_selection", False):
-        return
-
-    key = self._mc_checklist_resume_key()
-    if not key:
-        return
-
-    stage_index, item_index = self._mc_checklist_selected_indexes()
-
     if stage_index is None:
         return
 
-    store = _mc_checklist_get_resume_store()
+    store = _mc_resume_store()
     store[key] = {
         "stage": int(stage_index),
         "item": int(item_index) if item_index is not None else None,
     }
-
     settings.set_value("checklist_resume_state", store)
 
 
-def _mc_checklist_restore_resume_selection(self):
-    key = self._mc_checklist_resume_key()
-    store = _mc_checklist_get_resume_store()
-    saved = store.get(key) or {}
+def _mc_restore_resume(self):
+    key = self._mc_resume_key()
+    saved = _mc_resume_store().get(key)
+
+    if not saved:
+        return False
 
     stages = self.project_data.get("stages", [])
     if not stages:
@@ -1495,115 +1489,536 @@ def _mc_checklist_restore_resume_selection(self):
 
     stage_index = max(0, min(stage_index, len(stages) - 1))
 
+    raw_item = saved.get("item", None)
     try:
-        item_index = saved.get("item", None)
-        item_index = int(item_index) if item_index is not None else None
+        item_index = int(raw_item) if raw_item is not None else None
     except Exception:
         item_index = None
 
-    self._mc_restoring_resume_selection = True
+    self._mc_resume_suppress_save = True
 
     try:
-        stage_row = self.stage_list.get_row_at_index(stage_index)
+        # Select the saved stage and rebuild the item list.
+        self.selected_stage_index = stage_index
+        self.selected_item_index = None
 
+        stage_row = self.stage_list.get_row_at_index(stage_index)
         if stage_row is not None:
+            try:
+                self.stage_list.unselect_all()
+            except Exception:
+                pass
             self.stage_list.select_row(stage_row)
-            self.selected_stage_index = stage_index
             try:
                 stage_row.grab_focus()
             except Exception:
                 pass
 
+        # Force right side to match saved stage even if GTK signal timing is odd.
+        self._set_right_enabled(True)
+        self._refresh_items_list()
+        self._refresh_stage_header()
+        self._load_notes()
+
+        # Restore item after rows exist.
+        if item_index is not None:
+            items = stages[stage_index].get("items", [])
+            if items:
+                item_index = max(0, min(item_index, len(items) - 1))
+                item_row = self.items_list.get_row_at_index(item_index)
+
+                if item_row is not None:
+                    try:
+                        self.items_list.unselect_all()
+                    except Exception:
+                        pass
+                    self.items_list.select_row(item_row)
+                    self.selected_item_index = item_index
+                    self._load_task_description(item_index)
+                    try:
+                        item_row.grab_focus()
+                    except Exception:
+                        pass
+
+        if hasattr(self, "stage_title_lbl"):
+            title = stages[stage_index].get("title", "Untitled")
+            self.stage_title_lbl.set_tooltip_text(f"Resumed: {title}")
+
     finally:
-        self._mc_restoring_resume_selection = False
+        self._mc_resume_suppress_save = False
 
-    def restore_item_after_stage_load():
-        self._mc_restoring_resume_selection = True
-
-        try:
-            current_stages = self.project_data.get("stages", [])
-
-            if not current_stages or stage_index >= len(current_stages):
-                return False
-
-            items = current_stages[stage_index].get("items", [])
-
-            if not items or item_index is None:
-                return False
-
-            safe_item_index = max(0, min(item_index, len(items) - 1))
-            item_row = self.items_list.get_row_at_index(safe_item_index)
-
-            if item_row is not None:
-                self.items_list.select_row(item_row)
-                self.selected_item_index = safe_item_index
-
-                try:
-                    item_row.grab_focus()
-                except Exception:
-                    pass
-
-                if hasattr(self, "status_lbl"):
-                    self.status_lbl.set_text("Resumed last checklist item.")
-
-        finally:
-            self._mc_restoring_resume_selection = False
-
-        return False
-
-    GLib.idle_add(restore_item_after_stage_load)
     return False
 
 
-if not getattr(ChecklistWindow, "_mc_resume_patch_applied", False):
-    ChecklistWindow._mc_original_init = ChecklistWindow.__init__
-    ChecklistWindow._mc_original_on_close = ChecklistWindow._on_close
+if not getattr(ChecklistWindow, "_mc_resume_v2_applied", False):
+    ChecklistWindow._mc_base_init = ChecklistWindow.__init__
+    ChecklistWindow._mc_base_on_close = ChecklistWindow._on_close
+    ChecklistWindow._mc_base_on_stage_selected = ChecklistWindow._on_stage_selected
+    ChecklistWindow._mc_base_on_item_selected = ChecklistWindow._on_item_selected
 
-    if hasattr(ChecklistWindow, "_on_stage_selected"):
-        ChecklistWindow._mc_original_on_stage_selected = ChecklistWindow._on_stage_selected
+    ChecklistWindow._mc_resume_key = _mc_resume_key
+    ChecklistWindow._mc_save_resume = _mc_save_resume
+    ChecklistWindow._mc_restore_resume = _mc_restore_resume
 
-    if hasattr(ChecklistWindow, "_on_item_selected"):
-        ChecklistWindow._mc_original_on_item_selected = ChecklistWindow._on_item_selected
+    def _mc_init_v2(self, *args, **kwargs):
+        # Prevent the initial "select first stage" from overwriting saved state.
+        self._mc_resume_suppress_save = True
+        ChecklistWindow._mc_base_init(self, *args, **kwargs)
+        self._mc_resume_suppress_save = False
 
-    ChecklistWindow._mc_checklist_resume_key = _mc_checklist_resume_key
-    ChecklistWindow._mc_checklist_save_resume_selection = _mc_checklist_save_resume_selection
-    ChecklistWindow._mc_checklist_restore_resume_selection = _mc_checklist_restore_resume_selection
+        # Restore after GTK has created/shown stage + item rows.
+        GLib.timeout_add(120, self._mc_restore_resume)
 
-    def _mc_resume_init(self, *args, **kwargs):
-        ChecklistWindow._mc_original_init(self, *args, **kwargs)
-        GLib.idle_add(self._mc_checklist_restore_resume_selection)
+    def _mc_on_close_v2(self, *args, **kwargs):
+        self._mc_save_resume()
+        return ChecklistWindow._mc_base_on_close(self, *args, **kwargs)
 
-    def _mc_resume_on_close(self, *args, **kwargs):
-        self._mc_checklist_save_resume_selection()
-        return ChecklistWindow._mc_original_on_close(self, *args, **kwargs)
+    def _mc_on_stage_selected_v2(self, listbox, row):
+        result = ChecklistWindow._mc_base_on_stage_selected(self, listbox, row)
 
-    ChecklistWindow.__init__ = _mc_resume_init
-    ChecklistWindow._on_close = _mc_resume_on_close
+        if row is not None and hasattr(row, "stage_index"):
+            self.selected_stage_index = row.stage_index
+            self.selected_item_index = None
+            self._mc_save_resume()
 
-    if hasattr(ChecklistWindow, "_on_stage_selected"):
-        def _mc_resume_on_stage_selected(self, listbox, row):
-            result = ChecklistWindow._mc_original_on_stage_selected(self, listbox, row)
+        return result
 
-            if row is not None and hasattr(row, "stage_index"):
-                self.selected_stage_index = row.stage_index
-                self.selected_item_index = None
-                self._mc_checklist_save_resume_selection()
+    def _mc_on_item_selected_v2(self, listbox, row):
+        result = ChecklistWindow._mc_base_on_item_selected(self, listbox, row)
 
-            return result
+        if row is not None and hasattr(row, "item_index"):
+            self.selected_item_index = row.item_index
+            self._mc_save_resume()
 
-        ChecklistWindow._on_stage_selected = _mc_resume_on_stage_selected
+        return result
 
-    if hasattr(ChecklistWindow, "_on_item_selected"):
-        def _mc_resume_on_item_selected(self, listbox, row):
-            result = ChecklistWindow._mc_original_on_item_selected(self, listbox, row)
+    ChecklistWindow.__init__ = _mc_init_v2
+    ChecklistWindow._on_close = _mc_on_close_v2
+    ChecklistWindow._on_stage_selected = _mc_on_stage_selected_v2
+    ChecklistWindow._on_item_selected = _mc_on_item_selected_v2
+    ChecklistWindow._mc_resume_v2_applied = True
 
-            if row is not None and hasattr(row, "item_index"):
-                self.selected_item_index = row.item_index
-                self._mc_checklist_save_resume_selection()
 
-            return result
+# ── DevWise Branch/Issue checklist UI patch ─────────────────────────────────
+try:
+    import shlex
+    from core import issues as dw_issues
+    from core import git_ops as dw_git_ops
+except Exception:
+    shlex = None
+    dw_issues = None
+    dw_git_ops = None
 
-        ChecklistWindow._on_item_selected = _mc_resume_on_item_selected
 
-    ChecklistWindow._mc_resume_patch_applied = True
+def _dw_current_branch(self):
+    try:
+        return dw_git_ops.get_current_branch(self.project_path) if dw_git_ops else ""
+    except Exception:
+        return ""
+
+
+def _dw_current_issue(self):
+    if not dw_issues:
+        return None
+
+    try:
+        active_id = self.project_data.get("active_issue_id")
+        if active_id:
+            issue = dw_issues.get_issue(self.project_path, active_id)
+            if issue:
+                return issue
+        return dw_issues.active_issue(self.project_path)
+    except Exception:
+        return None
+
+
+def _dw_issue_tasks_from_selection(self):
+    stage = self._current_stage()
+    if stage is None:
+        return []
+
+    items = stage.get("items", [])
+    selected = []
+
+    try:
+        rows = self.items_list.get_selected_rows()
+    except Exception:
+        rows = []
+
+    for row in rows:
+        idx = getattr(row, "item_index", None)
+        if idx is not None and 0 <= idx < len(items):
+            selected.append(items[idx])
+
+    if not selected and getattr(self, "selected_item_index", None) is not None:
+        idx = self.selected_item_index
+        if 0 <= idx < len(items):
+            selected.append(items[idx])
+
+    if not selected:
+        selected = items[:]
+
+    return [
+        {
+            "text": item.get("text", ""),
+            "done": bool(item.get("done")),
+            "description": item.get("description", ""),
+        }
+        for item in selected
+        if item.get("text")
+    ]
+
+
+def _dw_add_branch_issue_bar(self):
+    if getattr(self, "_dw_branch_issue_bar_added", False):
+        return
+
+    root = self.get_child()
+    if root is None:
+        return
+
+    bar = Gtk.Box(spacing=8)
+    bar.set_border_width(7)
+
+    self.dw_branch_lbl = Gtk.Label(label="Branch: —")
+    self.dw_branch_lbl.set_halign(Gtk.Align.START)
+    bar.pack_start(self.dw_branch_lbl, False, False, 0)
+
+    issue_lbl = Gtk.Label(label="Issue:")
+    issue_lbl.set_halign(Gtk.Align.START)
+    bar.pack_start(issue_lbl, False, False, 0)
+
+    self.dw_issue_combo = Gtk.ComboBoxText()
+    self.dw_issue_combo.set_tooltip_text("Active local issue for this checklist/project")
+    self.dw_issue_combo.connect("changed", self._dw_on_issue_combo_changed)
+    bar.pack_start(self.dw_issue_combo, False, False, 0)
+
+    make_issue_btn = Gtk.Button(label="Create Issue From Selected")
+    make_issue_btn.set_tooltip_text("Turns selected checklist item(s), or the current stage, into a local issue.")
+    make_issue_btn.connect("clicked", self._dw_create_issue_from_selected)
+    bar.pack_start(make_issue_btn, False, False, 0)
+
+    branch_btn = Gtk.Button(label="Create/Switch Branch")
+    branch_btn.set_tooltip_text("Creates or switches to the active issue branch.")
+    branch_btn.connect("clicked", self._dw_create_or_switch_issue_branch)
+    bar.pack_start(branch_btn, False, False, 0)
+
+    focus_hint = Gtk.Label(label="Format: Branch → Issue → Task → Descript")
+    focus_hint.set_halign(Gtk.Align.START)
+    try:
+        focus_hint.get_style_context().add_class("dim-label")
+    except Exception:
+        pass
+    bar.pack_start(focus_hint, True, True, 0)
+
+    root.pack_start(bar, False, False, 0)
+    try:
+        root.reorder_child(bar, 1)
+    except Exception:
+        pass
+
+    self._dw_branch_issue_bar_added = True
+    self._dw_refresh_issue_combo()
+    self._dw_update_branch_issue_bar()
+    root.show_all()
+
+
+def _dw_refresh_issue_combo(self):
+    if not hasattr(self, "dw_issue_combo") or not dw_issues:
+        return
+
+    self._dw_loading_issue_combo = True
+    self.dw_issue_combo.remove_all()
+    self.dw_issue_combo.append("_none", "No active issue")
+
+    active_id = self.project_data.get("active_issue_id") or ""
+
+    try:
+        all_issues = dw_issues.list_issues(self.project_path)
+    except Exception:
+        all_issues = []
+
+    for issue in all_issues:
+        status = "✓ " if issue.get("status") == "closed" else ""
+        self.dw_issue_combo.append(issue.get("id"), status + issue.get("title", "Untitled issue"))
+
+    if active_id:
+        self.dw_issue_combo.set_active_id(active_id)
+    else:
+        self.dw_issue_combo.set_active_id("_none")
+
+    self._dw_loading_issue_combo = False
+
+
+def _dw_update_branch_issue_bar(self):
+    if not hasattr(self, "dw_branch_lbl"):
+        return
+
+    branch = self._dw_current_branch()
+    active = self._dw_current_issue()
+    stage = self._current_stage()
+
+    label = f"Branch: {branch or 'unknown'}"
+    if stage and stage.get("branch"):
+        label += f"  |  Checklist branch: {stage.get('branch')}"
+
+    self.dw_branch_lbl.set_text(label)
+
+    if active and hasattr(self, "dw_issue_combo"):
+        try:
+            self.dw_issue_combo.set_active_id(active.get("id"))
+        except Exception:
+            pass
+
+
+def _dw_on_issue_combo_changed(self, combo):
+    if getattr(self, "_dw_loading_issue_combo", False):
+        return
+
+    issue_id = combo.get_active_id()
+
+    if not issue_id or issue_id == "_none":
+        self.project_data["active_issue_id"] = None
+        return
+
+    self.project_data["active_issue_id"] = issue_id
+
+    stage = self._current_stage()
+    issue = dw_issues.get_issue(self.project_path, issue_id) if dw_issues else None
+
+    if stage is not None and issue:
+        stage["issue_id"] = issue_id
+        stage["issue"] = issue.get("title", "")
+        stage["branch"] = issue.get("branch", "")
+
+    try:
+        dw_issues.set_active_issue(self.project_path, issue_id)
+    except Exception:
+        pass
+
+    self._mark_dirty()
+    self._dw_update_branch_issue_bar()
+
+
+def _dw_create_issue_from_selected(self, _=None):
+    if not dw_issues:
+        self._show_info("Issue helper is unavailable.")
+        return
+
+    stage = self._current_stage()
+    if stage is None:
+        self._show_info("Select a stage first.")
+        return
+
+    tasks = self._dw_issue_tasks_from_selection()
+    default_title = stage.get("issue") or stage.get("title", "New issue")
+
+    dlg = Gtk.Dialog(title="Create Local Issue", transient_for=self, flags=0)
+    dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, "Create Issue", Gtk.ResponseType.OK)
+    dlg.set_default_size(520, 180)
+
+    box = dlg.get_content_area()
+    box.set_border_width(12)
+    box.set_spacing(8)
+
+    lbl = Gtk.Label(label="Issue title:")
+    lbl.set_halign(Gtk.Align.START)
+    box.pack_start(lbl, False, False, 0)
+
+    entry = Gtk.Entry()
+    entry.set_text(default_title)
+    entry.set_activates_default(True)
+    box.pack_start(entry, False, False, 0)
+
+    hint = Gtk.Label(label=f"Tasks captured: {len(tasks)}")
+    hint.set_halign(Gtk.Align.START)
+    box.pack_start(hint, False, False, 0)
+
+    dlg.set_default_response(Gtk.ResponseType.OK)
+    dlg.show_all()
+    response = dlg.run()
+    title = entry.get_text().strip()
+    dlg.destroy()
+
+    if response != Gtk.ResponseType.OK or not title:
+        return
+
+    branch = stage.get("branch") or dw_issues.slugify(title)
+    issue = dw_issues.create_issue(self.project_path, title, branch=branch, tasks=tasks, source="checklist")
+
+    self.project_data["active_issue_id"] = issue.get("id")
+    stage["issue_id"] = issue.get("id")
+    stage["issue"] = issue.get("title")
+    stage["branch"] = issue.get("branch")
+
+    for item in stage.get("items", []):
+        for task in tasks:
+            if item.get("text") == task.get("text"):
+                item["issue_id"] = issue.get("id")
+
+    self._dw_refresh_issue_combo()
+    self._dw_update_branch_issue_bar()
+    self._refresh_stage_header()
+    self._refresh_stage_list()
+    self._mark_dirty()
+    self._show_info(f"Created issue:\n{issue.get('title')}\n\nBranch:\n{issue.get('branch')}", title="Issue created")
+
+
+def _dw_create_or_switch_issue_branch(self, _=None):
+    if not dw_issues or not dw_git_ops:
+        self._show_info("Git/issue helper unavailable.")
+        return
+
+    issue = self._dw_current_issue()
+
+    if not issue:
+        self._dw_create_issue_from_selected()
+        issue = self._dw_current_issue()
+
+    if not issue:
+        return
+
+    branch = issue.get("branch") or dw_issues.slugify(issue.get("title"))
+
+    confirm = Gtk.MessageDialog(
+        transient_for=self,
+        flags=0,
+        message_type=Gtk.MessageType.QUESTION,
+        buttons=Gtk.ButtonsType.YES_NO,
+        text=f"Create/switch to branch '{branch}'?"
+    )
+    confirm.format_secondary_text(
+        "This only runs Git branch/checkout commands.\n"
+        "It does not commit, push or delete anything."
+    )
+    response = confirm.run()
+    confirm.destroy()
+
+    if response != Gtk.ResponseType.YES:
+        return
+
+    q = shlex.quote(branch) if shlex else branch
+    ok, existing = dw_git_ops.run_custom(self.project_path, f"git branch --list {q}")
+
+    if ok and existing.strip():
+        ok2, out = dw_git_ops.run_custom(self.project_path, f"git checkout {q}")
+    else:
+        ok2, out = dw_git_ops.run_custom(self.project_path, f"git checkout -b {q}")
+
+    self._dw_update_branch_issue_bar()
+
+    if ok2:
+        self._show_info(f"Now on branch:\n{branch}", title="Branch ready")
+    else:
+        self._show_info(out or "Could not create/switch branch.", title="Branch error")
+
+
+def _dw_mark_active_issue_closed(self, _=None):
+    issue = self._dw_current_issue()
+    if not issue or not dw_issues:
+        return
+    dw_issues.close_issue(self.project_path, issue.get("id"))
+    self._dw_refresh_issue_combo()
+
+
+def _dw_mark_active_issue_open(self, _=None):
+    issue = self._dw_current_issue()
+    if not issue or not dw_issues:
+        return
+    dw_issues.reopen_issue(self.project_path, issue.get("id"))
+    self._dw_refresh_issue_combo()
+
+
+def _dw_markdown_import_prompt(self):
+    project_name = os.path.basename(self.project_path) or "{project}"
+    return f"""Create a {project_name} DevWise checklist using this exact format.
+
+IMPORTANT OUTPUT RULE:
+Return only one copyable markdown code block. No explanation outside it.
+
+Use this structure:
+
+# Branch: feat/example-branch
+Notes: Optional branch/workstream context.
+
+## Issue: Short issue title
+- First task
+Descript: Useful detail for this task.
+
+- Second task
+Descript: Useful detail for this task.
+
+## Issue: Another issue title
+- Third task
+Descript: Useful detail for this task.
+
+Rules:
+- Use Branch for the Git branch/workstream.
+- Use Issue for grouped work.
+- Use normal bullet points for tasks.
+- Use Descript: directly under a task for task description.
+- Do not use checkbox syntax like [ ] or [x].
+- Keep task names short and descriptions useful.
+- Do not use tables.
+"""
+
+
+def _dw_make_stage_row(self, index, stage):
+    row = ChecklistWindow._dw_base_make_stage_row(self, index, stage)
+
+    try:
+        vbox = row.get_child()
+        extra_bits = []
+        if stage.get("branch"):
+            extra_bits.append("🌿 " + stage.get("branch"))
+        if stage.get("issue"):
+            extra_bits.append("Issue: " + stage.get("issue"))
+
+        if extra_bits:
+            lbl = Gtk.Label(label="  ·  ".join(extra_bits))
+            lbl.set_halign(Gtk.Align.START)
+            try:
+                lbl.get_style_context().add_class("stage-progress")
+            except Exception:
+                pass
+            vbox.pack_start(lbl, False, False, 0)
+            row.show_all()
+    except Exception:
+        pass
+
+    return row
+
+
+if not getattr(ChecklistWindow, "_dw_branch_issue_patch_applied", False):
+    ChecklistWindow._dw_base_build = ChecklistWindow._build
+    ChecklistWindow._dw_base_refresh_stage_header = ChecklistWindow._refresh_stage_header
+    ChecklistWindow._dw_base_make_stage_row = ChecklistWindow._make_stage_row
+
+    def _dw_build(self):
+        ChecklistWindow._dw_base_build(self)
+        self._dw_add_branch_issue_bar()
+
+    def _dw_refresh_stage_header(self):
+        result = ChecklistWindow._dw_base_refresh_stage_header(self)
+        self._dw_update_branch_issue_bar()
+        return result
+
+    ChecklistWindow._build = _dw_build
+    ChecklistWindow._refresh_stage_header = _dw_refresh_stage_header
+    ChecklistWindow._make_stage_row = _dw_make_stage_row
+    ChecklistWindow._markdown_import_prompt = _dw_markdown_import_prompt
+
+    ChecklistWindow._dw_current_branch = _dw_current_branch
+    ChecklistWindow._dw_current_issue = _dw_current_issue
+    ChecklistWindow._dw_issue_tasks_from_selection = _dw_issue_tasks_from_selection
+    ChecklistWindow._dw_add_branch_issue_bar = _dw_add_branch_issue_bar
+    ChecklistWindow._dw_refresh_issue_combo = _dw_refresh_issue_combo
+    ChecklistWindow._dw_update_branch_issue_bar = _dw_update_branch_issue_bar
+    ChecklistWindow._dw_on_issue_combo_changed = _dw_on_issue_combo_changed
+    ChecklistWindow._dw_create_issue_from_selected = _dw_create_issue_from_selected
+    ChecklistWindow._dw_create_or_switch_issue_branch = _dw_create_or_switch_issue_branch
+    ChecklistWindow._dw_mark_active_issue_closed = _dw_mark_active_issue_closed
+    ChecklistWindow._dw_mark_active_issue_open = _dw_mark_active_issue_open
+
+    ChecklistWindow._dw_branch_issue_patch_applied = True
 

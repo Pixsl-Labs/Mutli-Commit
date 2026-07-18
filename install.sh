@@ -1,10 +1,10 @@
 #!/bin/bash
-# Multi-Commit installer
+# DevWise installer
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "=============================="
-echo "  Multi-Commit Installer"
+echo "  DevWise Installer"
 echo "=============================="
 echo ""
 
@@ -20,12 +20,12 @@ touch "$SCRIPT_DIR/ui/__init__.py"
 chmod +x "$SCRIPT_DIR/main.py"
 
 # ── .desktop file (app menu + panel launcher) ──
-DESKTOP_SRC="$SCRIPT_DIR/multi-commit.desktop"
+DESKTOP_SRC="$SCRIPT_DIR/devwise.desktop"
 cat > "$DESKTOP_SRC" <<EOF
 [Desktop Entry]
-Name=Multi-Commit
-GenericName=Git GUI
-Comment=Commit and push to multiple git remotes
+Name=DevWise
+GenericName=Project Cockpit
+Comment=Local project cockpit for Git, checklists, sessions and code reviews
 Exec=python3 $SCRIPT_DIR/main.py
 Icon=$SCRIPT_DIR/assets/icon.png
 Terminal=false
@@ -33,20 +33,20 @@ Type=Application
 Categories=Development;Utility;
 Keywords=git;commit;push;github;
 StartupNotify=true
-StartupWMClass=multi-commit
+StartupWMClass=devwise
 EOF
 
 # Install to user apps (Ulauncher + app menu)
 APPS_DIR="$HOME/.local/share/applications"
 mkdir -p "$APPS_DIR"
-cp "$DESKTOP_SRC" "$APPS_DIR/multi-commit.desktop"
-chmod +x "$APPS_DIR/multi-commit.desktop"
+cp "$DESKTOP_SRC" "$APPS_DIR/devwise.desktop"
+chmod +x "$APPS_DIR/devwise.desktop"
 update-desktop-database "$APPS_DIR" 2>/dev/null || true
 
 # ── Panel launcher copy ──
-PANEL_DIR="$HOME/.local/share/multi-commit"
+PANEL_DIR="$HOME/.local/share/devwise"
 mkdir -p "$PANEL_DIR"
-cp "$DESKTOP_SRC" "$PANEL_DIR/multi-commit.desktop"
+cp "$DESKTOP_SRC" "$PANEL_DIR/devwise.desktop"
 
 echo ""
 echo "=============================="
@@ -55,7 +55,7 @@ echo "=============================="
 echo ""
 echo "Launch options:"
 echo "  Terminal:   python3 $SCRIPT_DIR/main.py"
-echo "  Ulauncher:  Ctrl+Space → type 'Multi-Commit'"
+echo "  Ulauncher:  Ctrl+Space → type 'DevWise'"
 echo "  App menu:   Right-click desktop → Applications"
 echo ""
 echo "To add to Cinnamon panel:"

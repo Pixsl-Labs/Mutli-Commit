@@ -118,6 +118,10 @@ class TableLabWindow(Gtk.Window):
         self.set_position(Gtk.WindowPosition.CENTER)
         GLib.idle_add(self.present)
 
+    def _table_lab_stage_2_marker(self):
+        """Stage 2 polish marker: Original Version flow, centred window, clearer labels."""
+        return True
+
     # ── Window behaviour ────────────────────────────────────────────────────
 
     def present_bottom_left(self):
@@ -334,17 +338,17 @@ class TableLabWindow(Gtk.Window):
         autosave_box.pack_start(self.autosave_switch, False, False, 0)
         toolbar.pack_start(autosave_box, False, False, 8)
 
-        parse_btn = Gtk.Button(label="1 Parse")
+        parse_btn = Gtk.Button(label="1 Infer / Parse")
         parse_btn.set_tooltip_text("Parse columns from the Table Caller and rows from Original Output")
         parse_btn.connect("clicked", self._parse_everything)
         toolbar.pack_start(parse_btn, False, False, 0)
 
-        preview_btn = Gtk.Button(label="2 Preview")
+        preview_btn = Gtk.Button(label="2 Live Preview")
         preview_btn.set_tooltip_text("Build the updated preview")
         preview_btn.connect("clicked", self._build_preview)
         toolbar.pack_start(preview_btn, False, False, 0)
 
-        code_btn = Gtk.Button(label="3 Generate Code")
+        code_btn = Gtk.Button(label="3 Generate Replacement")
         code_btn.set_tooltip_text("Generate updated replacement code")
         code_btn.connect("clicked", self._generate_replacement_code)
         toolbar.pack_start(code_btn, False, False, 0)
@@ -418,7 +422,7 @@ class TableLabWindow(Gtk.Window):
         output_box.set_border_width(8)
 
         output_header = Gtk.Box(spacing=6)
-        output_header.pack_start(self._label("Original Output", step=True), True, True, 0)
+        output_header.pack_start(self._label("Original Version", step=True), True, True, 0)
 
         load_output_btn = Gtk.Button(label="Load Example")
         load_output_btn.connect("clicked", self._load_example_original)
@@ -1526,6 +1530,7 @@ class TableLabWindow(Gtk.Window):
     def _build_preview(self, _=None):
         preview = self._render_table()
         self._set_text(self.preview_buf, preview)
+        self._refresh_generated_if_ready()
 
     def _columns_code(self):
         columns = self._read_columns()
@@ -1582,19 +1587,153 @@ class TableLabWindow(Gtk.Window):
 
         return pattern.sub(repl, caller)
 
-    def _generate_replacement_code(self, _=None):
-        caller = self._get_text(self.caller_buf).strip()
+    def _py_string(self, value):
+        return repr(str(value))
 
-        if not caller:
-            generated = self._columns_code()
-        else:
-            generated = self._replace_columns_block(caller)
-            generated = self._replace_format_column_widths(generated)
+    def _infer_output_title(self):
+        """
+        Try to infer the table title from lines like:
+        === Failed Login Summary ===
+        """
+        for line in self.prefix_lines:
+            clean = line.strip()
 
-        self._set_text(self.generated_buf, generated)
-        self.notebook.set_current_page(2)
-        self.status_lbl.set_text("✅ Replacement code generated.")
-        self._mark_dirty()
+            if clean.startswith("=") and clean.endswith("="):
+                return clean.strip("= ").strip()
+
+        return "Table Output"
+
+    def _infer_total_label(self):
+        """
+        Try to infer count label from lines like:
+        Unique Failed Login Entries: 22
+        Suspicious IPs Detected: 7
+        """
+        for line in self.prefix_lines:
+            clean = line.strip()
+
+            if ":" in clean:
+                label = clean.split(":", 1)[0].strip()
+
+                if label:
+                    return label
+
+        return ""
+
+    def _generated_code_from_original_output(self):
+        """
+        Build a starter caller block when the user only pasted Original Output.
+
+        This cannot know the real SentinelIR object names, so it generates a
+        safe rows/dict-style starter block that the user can quickly adapt.
+        """
+        columns = self._read_columns()
+
+        if not columns:
+            return "# No columns yet. Paste Original Output and click Infer Table first."
+
+        title = self._infer_output_title()
+        total_label = self._infer_total_label()
+
+        lines = [
+            "# Generated from Original Output by Table Lab.",
+            "# Replace `rows` with your real SentinelIR result list.",
+            "# Then replace row.get(...) with result.user / result.ip / etc. if needed.",
+            "",
+            f"print_section_header({self._py_string(title)}, Fore.YELLOW)",
+            "",
+            "# TODO: replace this with your real data source, e.g. results",
+            "rows = []",
+            "",
+        ]
+
+        if total_label:
+            lines.extend([
+                f"print_total_count({self._py_string(total_label)}, len(rows), Fore.CYAN)",
+                "",
+            ])
+
+        lines.append(self._columns_code())
+        lines.extend([
+            "",
+            "print_table_header(columns)",
+            "",
+            "for row in rows:",
+            "    print(",
+            '        "   "',
+        ])
+
+        for title, width, align in columns:
+            title_text = str(title)
+
+            # Placeholder columns like "-" should not try to read real data.
+            if title_text.strip() == "-":
+                expression = '"-"'
+            else:
+                expression = f'row.get({self._py_string(title_text)}, "-")'
+
+            if align == "<":
+                lines.append(f"        + format_column({expression}, {int(width)})")
+            else:
+                lines.append(f"        + format_column({expression}, {int(width)}, {self._py_string(align)})")
+
+        lines.extend([
+            "    )",
+            "",
+        ])
+
+        return "\n".join(lines)
+
+    def _refresh_generated_if_ready(self):
+        """
+        Keep Generated Replacement Code in sync after the user edits/reorders
+        columns, but only after code has already been generated once.
+        """
+        if getattr(self, "_loading", False):
+            return
+
+        if getattr(self, "_generating_replacement_code", False):
+            return
+
+        if not hasattr(self, "generated_buf"):
+            return
+
+        current = self._get_text(self.generated_buf).strip()
+
+        if current:
+            self._generate_replacement_code(auto=True)
+
+
+    def _generate_replacement_code(self, _=None, auto=False):
+        self._generating_replacement_code = True
+
+        try:
+            caller = self._get_text(self.caller_buf).strip()
+            original = self._get_text(self.original_buf).strip()
+            columns = self._read_columns()
+
+            if caller:
+                generated = self._replace_columns_block(caller)
+                generated = self._replace_format_column_widths(generated)
+
+            else:
+                # Original Output only mode.
+                # If the user pasted a new table but forgot to infer it, try now.
+                if original and not columns:
+                    self._infer_from_original_output()
+
+                generated = self._generated_code_from_original_output()
+
+            self._set_text(self.generated_buf, generated)
+
+            if not auto:
+                self.notebook.set_current_page(2)
+                self.status_lbl.set_text("✅ Replacement code generated.")
+
+            self._mark_dirty()
+
+        finally:
+            self._generating_replacement_code = False
 
     # ── Help ────────────────────────────────────────────────────────────────
 

@@ -217,5 +217,13 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Handoff
-HANDOFF.md
+# Local
+.local# DevWise local/runtime clutter
+.local/
+.devwise_patch_backups/
+.patch_backups/
+.repair_backups/
+*.pyc
+*.pyo
+*.before_*
+*.broken.*

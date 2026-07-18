@@ -1,6 +1,6 @@
-# Multi-Commit
+# DevWise
 
-> A GTK-powered Git GUI for Linux — commit and push to multiple remotes at once, with branch management, stash tools, favourites and more.
+> A Linux desktop project cockpit for Git, checklists, project sessions, code reviews, diagnostics and local developer workflows.
 
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
@@ -10,9 +10,9 @@
 
 ---
 
-## What is Multi-Commit?
+## What is DevWise?
 
-Multi-Commit is a lightweight GTK3 desktop app for Linux that makes git workflows faster and easier. Built specifically for developers who push to **multiple remotes** (e.g. personal GitHub + university GitHub), it wraps the full git workflow into a clean, keyboard-friendly UI.
+DevWise is a lightweight GTK3 desktop app for Linux that helps manage coding projects, Git workflows, project checklists, local issues, sessions, code reviews and handoffs from one cockpit.
 
 Built on **Linux Mint Cinnamon** — works on any GTK3-compatible distro.
 
@@ -70,8 +70,8 @@ Built on **Linux Mint Cinnamon** — works on any GTK3-compatible distro.
 ### Quick Install
 
 ```bash
-git clone https://github.com/Pixsl-Labs/Multi-Commit.git
-cd Multi-Commit
+git clone https://github.com/Pixsl-Labs/DevWise.git
+cd DevWise
 chmod +x install.sh
 ./install.sh
 ```
@@ -85,9 +85,9 @@ The installer will:
 
 ```bash
 # Terminal
-python3 ~/Projects/Multi-Commit/main.py
+python3 ~/Projects/DevWise/main.py
 
-# Or via Ulauncher (Ctrl+Space) → type "Multi-Commit"
+# Or via Ulauncher (Ctrl+Space) → type "DevWise"
 
 # Or from your app menu / taskbar after install
 ```
@@ -99,7 +99,7 @@ python3 ~/Projects/Multi-Commit/main.py
 See [PANEL_SETUP.md](PANEL_SETUP.md) for step-by-step instructions.
 
 **Quickest method:**
-1. Click the Menu button → find Multi-Commit
+1. Click the Menu button → find DevWise
 2. Right-click → Add to panel
 
 ---
@@ -117,7 +117,7 @@ See [PANEL_SETUP.md](PANEL_SETUP.md) for step-by-step instructions.
 ## Project Structure
 
 ```
-Multi-Commit/
+DevWise/
 ├── main.py                  # Entry point
 ├── install.sh               # Installer
 ├── PANEL_SETUP.md           # Panel/taskbar setup guide
@@ -145,7 +145,7 @@ Multi-Commit/
 
 ## Configuration
 
-Settings are stored in `~/.config/multi-commit/`:
+Settings are stored in `~/.config/devwise/`:
 
 | File | Contents |
 |------|----------|
@@ -157,7 +157,7 @@ Settings are stored in `~/.config/multi-commit/`:
 
 ## Use Case: Multiple GitHub Accounts
 
-Multi-Commit was built to solve the problem of pushing to both a **personal GitHub** and a **university/work GitHub** from the same repo:
+DevWise was built to solve the problem of pushing to both a **personal GitHub** and a **university/work GitHub** from the same repo:
 
 ```bash
 # Add your remotes (or use the Remotes tab in Settings)
@@ -186,8 +186,8 @@ git remote add uni     https://github.com/uni-user/repo.git
 Pull requests welcome! Please open an issue first for major changes.
 
 ```bash
-git clone https://github.com/Pixsl-Labs/Multi-Commit.git
-cd Multi-Commit
+git clone https://github.com/Pixsl-Labs/DevWise.git
+cd DevWise
 python3 main.py  # run from source, no build step needed
 ```
 
