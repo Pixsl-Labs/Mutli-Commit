@@ -2446,3 +2446,188 @@ def _dw_update_checklist_prompt_with_done(self):
 ChecklistWindow._markdown_import_prompt = _dw_branch_issue_import_prompt_with_done
 ChecklistWindow._dw_update_checklist_prompt = _dw_update_checklist_prompt_with_done
 
+
+# ── DevWise active-only update prompt UI patch ──────────────────────────────
+def _dw_active_checklist_markdown(self):
+    return checklists.dw_active_markdown(
+        self.project_path,
+        os.path.basename(os.path.abspath(self.project_path)),
+        include_completed_summary=True,
+    )
+
+
+def _dw_completed_summary_markdown(self):
+    return checklists.dw_completed_summary(
+        self.project_path,
+        os.path.basename(os.path.abspath(self.project_path)),
+    )
+
+
+def _dw_full_checklist_markdown(self):
+    return checklists.export_markdown(
+        self.project_path,
+        os.path.basename(os.path.abspath(self.project_path)),
+    )
+
+
+def _dw_update_prompt_active_only(self):
+    return checklists.dw_update_prompt_active(
+        self.project_path,
+        os.path.basename(os.path.abspath(self.project_path)),
+    )
+
+
+def _dw_save_named_markdown_file(self, markdown_text, suffix):
+    dlg = Gtk.FileChooserDialog(
+        title="Save Checklist Markdown",
+        transient_for=self,
+        action=Gtk.FileChooserAction.SAVE,
+        buttons=(
+            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_SAVE, Gtk.ResponseType.OK,
+        ),
+    )
+    dlg.set_do_overwrite_confirmation(True)
+
+    default_dir = os.path.expanduser("~/Projects/Code Reviews")
+    os.makedirs(default_dir, exist_ok=True)
+    dlg.set_current_folder(default_dir)
+    dlg.set_current_name(f"{os.path.basename(self.project_path)}_{suffix}.md")
+
+    if dlg.run() == Gtk.ResponseType.OK:
+        out_path = dlg.get_filename()
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(markdown_text)
+            activity.log_event(self.project_path, "checklist_exported", f"Exported checklist to {out_path}")
+            self._show_info(f"Checklist exported to:\n{out_path}")
+        except Exception as e:
+            self._show_info(f"Failed to export:\n{e}", title="Error")
+
+    dlg.destroy()
+
+
+def _dw_copy_active_update_prompt(self, *_):
+    self._dw_copy_to_clipboard(
+        self._dw_update_checklist_prompt(),
+        "Active-work update prompt copied."
+    )
+
+
+def _dw_export_checklist_v3(self, _=None):
+    active = self._dw_active_checklist_markdown()
+    update_prompt = self._dw_update_checklist_prompt()
+    full = self._dw_full_checklist_markdown()
+    summary = self._dw_completed_summary_markdown()
+
+    dlg = Gtk.Dialog(title="Export / Update Checklist", transient_for=self, flags=0)
+    dlg.add_buttons(Gtk.STOCK_CLOSE, Gtk.ResponseType.CLOSE)
+    dlg.set_default_size(840, 660)
+
+    box = dlg.get_content_area()
+    box.set_border_width(10)
+    box.set_spacing(8)
+
+    hint = Gtk.Label()
+    hint.set_markup(
+        "<b>Recommended default:</b> copy the Update Prompt. "
+        "It focuses on active/incomplete work and only includes completed work as a short summary.\n"
+        "<b>Full Checklist</b> is still available for archive/evidence."
+    )
+    hint.set_halign(Gtk.Align.START)
+    hint.set_line_wrap(True)
+    box.pack_start(hint, False, False, 0)
+
+    buttons = Gtk.Box(spacing=6)
+
+    copy_update = Gtk.Button(label="🔁 Copy Update Prompt")
+    copy_update.set_tooltip_text("Best option for ChatGPT/Claude. Excludes full completed task detail.")
+    copy_update.connect("clicked", lambda _: self._dw_copy_to_clipboard(update_prompt, "Active-work update prompt copied."))
+
+    copy_active = Gtk.Button(label="📋 Copy Active Checklist")
+    copy_active.set_tooltip_text("Copies active/incomplete work plus completed summary.")
+    copy_active.connect("clicked", lambda _: self._dw_copy_to_clipboard(active, "Active checklist copied."))
+
+    copy_full = Gtk.Button(label="📚 Copy Full Checklist")
+    copy_full.set_tooltip_text("Copies everything, including completed task lists.")
+    copy_full.connect("clicked", lambda _: self._dw_copy_to_clipboard(full, "Full checklist copied."))
+
+    copy_summary = Gtk.Button(label="✅ Copy Completed Summary")
+    copy_summary.connect("clicked", lambda _: self._dw_copy_to_clipboard(summary, "Completed summary copied."))
+
+    save_active = Gtk.Button(label="💾 Save Active")
+    save_active.connect("clicked", lambda _: self._dw_save_named_markdown_file(active, "active_checklist"))
+
+    buttons.pack_start(copy_update, False, False, 0)
+    buttons.pack_start(copy_active, False, False, 0)
+    buttons.pack_start(copy_full, False, False, 0)
+    buttons.pack_start(copy_summary, False, False, 0)
+    buttons.pack_end(save_active, False, False, 0)
+    box.pack_start(buttons, False, False, 0)
+
+    notebook = Gtk.Notebook()
+
+    active_page, _active_view = self._dw_text_page(active, editable=False)
+    prompt_page, _prompt_view = self._dw_text_page(update_prompt, editable=False)
+    full_page, _full_view = self._dw_text_page(full, editable=False)
+    summary_page, _summary_view = self._dw_text_page(summary, editable=False)
+
+    notebook.append_page(prompt_page, Gtk.Label(label="Update Prompt"))
+    notebook.append_page(active_page, Gtk.Label(label="Active Checklist"))
+    notebook.append_page(summary_page, Gtk.Label(label="Completed Summary"))
+    notebook.append_page(full_page, Gtk.Label(label="Full Checklist"))
+
+    box.pack_start(notebook, True, True, 0)
+
+    dlg.show_all()
+    dlg.run()
+    dlg.destroy()
+
+
+def _dw_markdown_import_prompt_active_default(self):
+    project_name = os.path.basename(self.project_path) or "{project}"
+
+    return f"""Create or update a {project_name} DevWise checklist.
+
+IMPORTANT OUTPUT RULE:
+Return only one clean markdown code block. No explanation outside it.
+Do not include citations, source labels, contentReference tags, oaicite tags, or tables.
+
+Use this exact structure:
+
+# Branch: feat/example-branch
+Notes: Optional branch/workstream context.
+
+## Issue: Short issue title
+Stage Status: IN PROGRESS
+Stage Progress: 0 / 2 tasks complete
+
+- First task name
+Done: no
+Descript: Useful detail for this task.
+
+- Second task name
+Done: no
+Descript: Useful detail for this task.
+
+Rules:
+- Use Branch for the Git branch/workstream.
+- Use Issue for grouped work.
+- Use normal bullet points for tasks.
+- Use Done: yes or Done: no under each task.
+- Use Descript: directly under each task for task description.
+- If updating an existing checklist, focus on active/incomplete work.
+- Keep completed work only as completed context unless I explicitly ask for full completed tasks.
+- Do not use checkbox syntax like [ ] or [x].
+"""
+
+
+ChecklistWindow._dw_active_checklist_markdown = _dw_active_checklist_markdown
+ChecklistWindow._dw_completed_summary_markdown = _dw_completed_summary_markdown
+ChecklistWindow._dw_full_checklist_markdown = _dw_full_checklist_markdown
+ChecklistWindow._dw_update_checklist_prompt = _dw_update_prompt_active_only
+ChecklistWindow._dw_copy_active_update_prompt = _dw_copy_active_update_prompt
+ChecklistWindow._dw_save_named_markdown_file = _dw_save_named_markdown_file
+ChecklistWindow._export_checklist = _dw_export_checklist_v3
+ChecklistWindow._markdown_import_prompt = _dw_markdown_import_prompt_active_default
+

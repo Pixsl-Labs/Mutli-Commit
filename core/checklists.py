@@ -1071,3 +1071,209 @@ def export_markdown(project_path, project_name="Project"):
 
     return "\n".join(lines).rstrip() + "\n"
 
+
+# ── DevWise active checklist export helpers ─────────────────────────────────
+# Keeps full checklist export available, but lets update prompts focus on
+# active/incomplete work instead of repeating completed task detail.
+
+def dw_stage_status(stage):
+    done, total = progress_for_stage(stage)
+
+    if total <= 0:
+        return "EMPTY"
+
+    if done <= 0:
+        return "NOT STARTED"
+
+    if done >= total:
+        return "COMPLETE"
+
+    return "IN PROGRESS"
+
+
+def dw_stage_title(stage):
+    return (
+        stage.get("issue")
+        or stage.get("title")
+        or "Untitled issue"
+    )
+
+
+def dw_completed_summary(project_path, project_name="Project"):
+    data = get_project_data(project_path)
+    stages = data.get("stages", [])
+
+    lines = [f"# {project_name} — Completed Summary", ""]
+    count = 0
+
+    last_branch = None
+
+    for stage in stages:
+        status = dw_stage_status(stage)
+
+        if status != "COMPLETE":
+            continue
+
+        branch = stage.get("branch", "").strip()
+        done, total = progress_for_stage(stage)
+
+        if branch and branch != last_branch:
+            lines.extend([f"## Branch: {branch}", ""])
+            last_branch = branch
+
+        lines.append(f"- {dw_stage_title(stage)} — COMPLETE ({done}/{total})")
+        count += 1
+
+    if count == 0:
+        lines.append("- No completed issues yet.")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def dw_active_markdown(project_path, project_name="Project", include_completed_summary=True):
+    """
+    Export active/incomplete work only.
+
+    Includes:
+    - NOT STARTED / IN PROGRESS / EMPTY issues
+    - incomplete tasks
+    - optional compact completed summary
+
+    Excludes by default:
+    - full completed task lists
+    - completed descriptions
+    """
+    data = get_project_data(project_path)
+    stages = data.get("stages", [])
+
+    lines = [f"# {project_name} — Active DevWise Checklist", ""]
+    last_branch = None
+    active_count = 0
+
+    for stage in stages:
+        status = dw_stage_status(stage)
+
+        if status == "COMPLETE":
+            continue
+
+        branch = stage.get("branch", "").strip()
+        issue = dw_stage_title(stage)
+        done, total = progress_for_stage(stage)
+
+        if branch and branch != last_branch:
+            lines.extend([f"# Branch: {branch}", ""])
+            last_branch = branch
+
+        lines.append(f"## Issue: {issue}")
+        lines.append(f"Stage Status: {status}")
+        lines.append(f"Stage Progress: {done} / {total} tasks complete")
+
+        notes = stage.get("notes", "").strip()
+        if notes:
+            lines.append(f"Notes: {notes}")
+
+        lines.append("")
+
+        items = stage.get("items", [])
+
+        if not items:
+            lines.append("- Define next task")
+            lines.append("Done: no")
+            lines.append("Descript: Add the first useful task for this issue.")
+            lines.append("")
+        else:
+            any_incomplete = False
+
+            for item in items:
+                if item.get("done"):
+                    continue
+
+                any_incomplete = True
+                lines.append(f"- {item.get('text', '')}")
+                lines.append("Done: no")
+
+                desc = item.get("description", "").strip()
+                if desc:
+                    desc_lines = desc.splitlines()
+                    lines.append(f"Descript: {desc_lines[0]}")
+                    for extra in desc_lines[1:]:
+                        lines.append(extra)
+                else:
+                    lines.append("Descript: Add useful implementation detail.")
+
+                lines.append("")
+
+            if not any_incomplete and status != "COMPLETE":
+                lines.append("- Review issue status")
+                lines.append("Done: no")
+                lines.append("Descript: This issue is not marked complete but has no outstanding tasks.")
+                lines.append("")
+
+        active_count += 1
+
+    if active_count == 0:
+        lines.append("## Issue: Next work")
+        lines.append("Stage Status: NOT STARTED")
+        lines.append("Stage Progress: 0 / 1 tasks complete")
+        lines.append("")
+        lines.append("- Decide next improvement")
+        lines.append("Done: no")
+        lines.append("Descript: Add the next useful DevWise improvement.")
+        lines.append("")
+
+    if include_completed_summary:
+        summary = dw_completed_summary(project_path, project_name)
+        lines.extend([
+            "",
+            "---",
+            "",
+            summary.rstrip(),
+            "",
+            "Note: completed work is summarised only. Do not expand completed work unless I explicitly ask.",
+        ])
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def dw_update_prompt_active(project_path, project_name="Project"):
+    active = dw_active_markdown(
+        project_path,
+        project_name,
+        include_completed_summary=True,
+    )
+
+    return (
+        "Update this DevWise checklist.\n\n"
+        "IMPORTANT OUTPUT RULE:\n"
+        "Return only one clean markdown code block containing the updated checklist.\n"
+        "Do not include explanations, citations, source labels, contentReference tags, oaicite tags, or tables.\n\n"
+        "Main goal:\n"
+        "- Focus on active, incomplete, not-started, or in-progress work.\n"
+        "- Keep useful existing branches, issues, tasks, notes and descriptions.\n"
+        "- Add missing branches/issues/tasks where useful.\n"
+        "- Improve wording where helpful.\n"
+        "- Do not delete useful existing work unless it is clearly duplicated or I explicitly ask.\n\n"
+        "Completed-work rule:\n"
+        "- Completed work is included only as a compact summary.\n"
+        "- Do not recreate full completed task lists.\n"
+        "- Do not turn completed work back into outstanding work unless I explicitly ask.\n\n"
+        "Required format:\n"
+        "# Branch: feat/example-branch\n"
+        "Notes: Optional branch/workstream context.\n\n"
+        "## Issue: Short issue title\n"
+        "Stage Status: IN PROGRESS\n"
+        "Stage Progress: 1 / 2 tasks complete\n\n"
+        "- Task name\n"
+        "Done: no\n"
+        "Descript: Useful detail for the task.\n\n"
+        "Rules:\n"
+        "- Use Branch → Issue → Task → Done → Descript format.\n"
+        "- Use Done: yes/no under each task.\n"
+        "- Do not use checkbox syntax like [ ] or [x].\n"
+        "- Do not use tables.\n\n"
+        "Current active checklist context:\n\n"
+        "```markdown\n"
+        f"{active.rstrip()}\n"
+        "\n```\n"
+    )
+
