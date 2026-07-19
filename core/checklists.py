@@ -409,3 +409,665 @@ def export_markdown(project_path, project_name="Project"):
 
     return "\n".join(lines).rstrip() + "\n"
 
+
+# ── DevWise checklist completed-status export patch ─────────────────────────
+# Export now gives AI useful status context:
+# - Stage Status: COMPLETE / IN PROGRESS / NOT STARTED / EMPTY
+# - Done: yes/no under each task
+#
+# Parser also understands Done: yes/no so exported checklists can be re-imported
+# without using checkbox syntax.
+
+_dw_status_base_parse_markdown_roadmap = parse_markdown_roadmap
+
+
+def _dw_status_label(done, total):
+    if total <= 0:
+        return "EMPTY"
+    if done == 0:
+        return "NOT STARTED"
+    if done >= total:
+        return "COMPLETE"
+    return "IN PROGRESS"
+
+
+def _dw_parse_done_value(value):
+    value = str(value or "").strip().lower()
+    return value in ("yes", "y", "true", "done", "complete", "completed", "1")
+
+
+def parse_markdown_roadmap(markdown_text):
+    import re
+
+    stages = _dw_status_base_parse_markdown_roadmap(markdown_text)
+
+    # Second lightweight pass: apply Done: yes/no lines to the task before them.
+    stage_index = -1
+    item_index = -1
+
+    for raw in (markdown_text or "").splitlines():
+        stripped = raw.strip()
+
+        if not stripped:
+            continue
+
+        if re.match(r"^\s*#{1,6}\s*(Branch)\s*:", stripped, flags=re.I):
+            continue
+
+        if re.match(r"^\s*#{1,6}\s+", stripped):
+            stage_index += 1
+            item_index = -1
+            continue
+
+        bullet = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+)$", stripped)
+        if bullet and stage_index >= 0:
+            item_index += 1
+            continue
+
+        done_match = re.match(r"^\s*Done\s*:\s*(.+)$", stripped, flags=re.I)
+        if done_match and stage_index >= 0 and item_index >= 0:
+            try:
+                stages[stage_index]["items"][item_index]["done"] = _dw_parse_done_value(done_match.group(1))
+            except Exception:
+                pass
+
+    return stages
+
+
+def export_markdown(project_path, project_name="Project"):
+    data = get_project_data(project_path)
+    stages = data.get("stages", [])
+
+    done, total = progress_for_project(data)
+    overall_status = _dw_status_label(done, total)
+
+    lines = [
+        f"# {project_name} — Current Checklist",
+        "",
+        f"Overall Status: {overall_status}",
+        f"Overall Progress: {done} / {total} tasks complete",
+        "",
+        "Export Notes:",
+        "- Done: yes means the task is already completed.",
+        "- Done: no means the task is still outstanding.",
+        "- COMPLETE stages/issues should usually be kept as completed context, not rewritten as new work.",
+        "- IN PROGRESS and NOT STARTED areas are the best places to add/improve next tasks.",
+        "",
+    ]
+
+    last_branch = object()
+
+    for stage in stages:
+        s_done, s_total = progress_for_stage(stage)
+        status = _dw_status_label(s_done, s_total)
+
+        branch = stage.get("branch", "")
+        issue = stage.get("issue", "")
+
+        if branch and branch != last_branch:
+            lines.extend([f"# Branch: {branch}", ""])
+            last_branch = branch
+
+        title = issue or stage.get("title", "Untitled Stage")
+
+        if issue:
+            lines.append(f"## Issue: {title}")
+        else:
+            lines.append(f"## Stage: {title}")
+
+        lines.append(f"Stage Status: {status}")
+        lines.append(f"Stage Progress: {s_done} / {s_total} tasks complete")
+
+        notes = stage.get("notes", "").strip()
+        if notes:
+            lines.append(f"Notes: {notes}")
+
+        lines.append("")
+
+        for item in stage.get("items", []):
+            task_done = bool(item.get("done"))
+            lines.append(f"- {item.get('text', '')}")
+            lines.append(f"Done: {'yes' if task_done else 'no'}")
+
+            desc = item.get("description", "").strip()
+            if desc:
+                lines.append(f"Descript: {desc}")
+
+            lines.append("")
+
+        if s_total > 0 and s_done >= s_total:
+            lines.append("Completion Note: This stage/issue is fully complete.")
+            lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+# ── DevWise robust Done/Descript import/export patch ────────────────────────
+# Final parser override:
+# - Branch / Issue / Stage aware
+# - Done: yes/no attaches to the previous task
+# - Descript: attaches to the real task, not the Done line
+# - Source Checklist / contentReference / oaicite junk is ignored
+# - Stage Status / Progress metadata is kept as context, not imported as tasks
+
+def _dw_status_label(done, total):
+    if total <= 0:
+        return "EMPTY"
+    if done == 0:
+        return "NOT STARTED"
+    if done >= total:
+        return "COMPLETE"
+    return "IN PROGRESS"
+
+
+def _dw_parse_done_value(value):
+    value = str(value or "").strip().lower()
+    return value in ("yes", "y", "true", "done", "complete", "completed", "1", "x")
+
+
+def _dw_strip_checkbox_and_done(raw):
+    import re
+
+    raw = str(raw or "").strip()
+    done = False
+
+    m = re.match(r"^\[([ xX])\]\s*(.+)$", raw)
+    if m:
+        done = m.group(1).lower() == "x"
+        raw = m.group(2).strip()
+
+    return raw, done
+
+
+def _dw_extract_markdown_block(markdown_text):
+    import re
+
+    text = markdown_text or ""
+
+    blocks = re.findall(r"```(?:markdown|md|text)?\s*\n([\s\S]*?)```", text, flags=re.I)
+
+    if blocks:
+        for block in blocks:
+            if "# Branch:" in block or "## Issue:" in block or "Done:" in block or "Descript:" in block:
+                return block
+        return blocks[0]
+
+    return text
+
+
+def _dw_is_reference_junk(line):
+    lowered = line.lower()
+    return (
+        "contentreference" in lowered
+        or "oaicite" in lowered
+        or lowered.startswith("source checklist:")
+        or lowered.startswith("source:")
+    )
+
+
+def _dw_is_metadata_line(line):
+    lowered = line.strip().lower()
+
+    prefixes = (
+        "overall status:",
+        "overall progress:",
+        "export notes:",
+        "current checklist:",
+        "format to return:",
+        "important output rule:",
+        "goal:",
+        "status rules:",
+        "rules:",
+        "completion note:",
+        "stage status:",
+        "stage progress:",
+        "status:",
+        "progress:",
+    )
+
+    return lowered.startswith(prefixes)
+
+
+def parse_markdown_roadmap(markdown_text):
+    import re
+
+    text = _dw_extract_markdown_block(markdown_text)
+
+    stages = []
+    current_branch = ""
+    pending_branch_notes = ""
+    current_stage = None
+    last_item = None
+    in_description = False
+    in_notes = False
+    skipping_export_notes = False
+
+    def append_text(existing, extra):
+        extra = str(extra or "").strip()
+        if not extra:
+            return existing or ""
+        existing = str(existing or "").strip()
+        return (existing + "\n" + extra).strip() if existing else extra
+
+    def ensure_stage(title="General"):
+        nonlocal current_stage
+        if current_stage is None:
+            current_stage = new_stage(title)
+            if current_branch:
+                current_stage["branch"] = current_branch
+            if pending_branch_notes:
+                current_stage["notes"] = pending_branch_notes
+            stages.append(current_stage)
+        return current_stage
+
+    def start_stage(title, issue=False):
+        nonlocal current_stage, last_item, in_description, in_notes, skipping_export_notes
+
+        current_stage = new_stage(title)
+
+        if current_branch:
+            current_stage["branch"] = current_branch
+
+        if issue:
+            current_stage["issue"] = title
+
+        if pending_branch_notes:
+            current_stage["notes"] = pending_branch_notes
+
+        stages.append(current_stage)
+        last_item = None
+        in_description = False
+        in_notes = False
+        skipping_export_notes = False
+
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+
+        if not stripped:
+            in_description = False
+            in_notes = False
+            continue
+
+        if stripped.startswith("```"):
+            continue
+
+        if _dw_is_reference_junk(stripped):
+            continue
+
+        branch_match = re.match(r"^\s*#{1,6}\s*Branch\s*:\s*(.+)$", stripped, flags=re.I)
+        if branch_match:
+            current_branch = branch_match.group(1).strip()
+            pending_branch_notes = ""
+            current_stage = None
+            last_item = None
+            in_description = False
+            in_notes = False
+            skipping_export_notes = False
+            continue
+
+        issue_match = re.match(r"^\s*#{1,6}\s*Issue\s*:\s*(.+)$", stripped, flags=re.I)
+        if issue_match:
+            start_stage(issue_match.group(1).strip(), issue=True)
+            continue
+
+        stage_match = re.match(r"^\s*#{1,6}\s*Stage\s*:\s*(.+)$", stripped, flags=re.I)
+        if stage_match:
+            start_stage(stage_match.group(1).strip(), issue=False)
+            continue
+
+        heading_match = re.match(r"^\s*#{1,6}\s+(.+)$", stripped)
+        if heading_match:
+            title = heading_match.group(1).strip()
+
+            # Ignore document title headings like "# SentinelIR — Current Checklist"
+            if "current checklist" in title.lower() or title.lower().endswith("checklist"):
+                continue
+
+            start_stage(title, issue=False)
+            continue
+
+        if stripped.lower().startswith("export notes:"):
+            skipping_export_notes = True
+            continue
+
+        if skipping_export_notes:
+            # Skip explanatory export-note bullets until the next heading.
+            continue
+
+        notes_match = re.match(r"^\s*Notes\s*:\s*(.*)$", stripped, flags=re.I)
+        if notes_match:
+            note = notes_match.group(1).strip()
+
+            if current_stage is None:
+                pending_branch_notes = append_text(pending_branch_notes, note)
+            else:
+                current_stage["notes"] = append_text(current_stage.get("notes", ""), note)
+
+            last_item = None
+            in_description = False
+            in_notes = True
+            continue
+
+        done_match = re.match(r"^\s*Done\s*:\s*(.+)$", stripped, flags=re.I)
+        if done_match and last_item is not None:
+            last_item["done"] = _dw_parse_done_value(done_match.group(1))
+            in_description = False
+            in_notes = False
+            continue
+
+        descript_match = re.match(r"^\s*Descript\s*:\s*(.*)$", stripped, flags=re.I)
+        if descript_match and last_item is not None:
+            last_item["description"] = append_text(last_item.get("description", ""), descript_match.group(1))
+            in_description = True
+            in_notes = False
+            continue
+
+        if _dw_is_metadata_line(stripped):
+            continue
+
+        bullet_match = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+)$", stripped)
+        if bullet_match:
+            task_text, done = _dw_strip_checkbox_and_done(bullet_match.group(1))
+
+            # Skip exported instruction bullets before the first real stage/issue.
+            if current_stage is None and not current_branch and not stages:
+                continue
+
+            if task_text:
+                stage = ensure_stage()
+                last_item = new_item(task_text, done=done)
+                stage.setdefault("items", []).append(last_item)
+
+            in_description = False
+            in_notes = False
+            continue
+
+        if in_description and last_item is not None:
+            last_item["description"] = append_text(last_item.get("description", ""), stripped)
+            continue
+
+        if in_notes:
+            if current_stage is None:
+                pending_branch_notes = append_text(pending_branch_notes, stripped)
+            else:
+                current_stage["notes"] = append_text(current_stage.get("notes", ""), stripped)
+            continue
+
+        # Safe fallback: plain text under a stage becomes notes, not a random task.
+        if current_stage is not None:
+            current_stage["notes"] = append_text(current_stage.get("notes", ""), stripped)
+
+    return stages
+
+
+def export_markdown(project_path, project_name="Project"):
+    data = get_project_data(project_path)
+    stages = data.get("stages", [])
+
+    done, total = progress_for_project(data)
+    overall_status = _dw_status_label(done, total)
+
+    lines = [
+        f"# {project_name} — Current Checklist",
+        "",
+        f"Overall Status: {overall_status}",
+        f"Overall Progress: {done} / {total} tasks complete",
+        "",
+        "Export Notes:",
+        "- Done: yes means this task is already completed.",
+        "- Done: no means this task is still outstanding.",
+        "- Completed stages/issues are included as context and should not be recreated as new work.",
+        "",
+    ]
+
+    last_branch = object()
+
+    for stage in stages:
+        s_done, s_total = progress_for_stage(stage)
+        status = _dw_status_label(s_done, s_total)
+
+        branch = stage.get("branch", "")
+        issue = stage.get("issue", "")
+        title = issue or stage.get("title", "Untitled Stage")
+
+        if branch and branch != last_branch:
+            lines.extend([f"# Branch: {branch}", ""])
+            last_branch = branch
+
+        if issue:
+            lines.append(f"## Issue: {title}")
+        else:
+            lines.append(f"## Stage: {title}")
+
+        lines.append(f"Status: {status}")
+        lines.append(f"Progress: {s_done} / {s_total} tasks complete")
+
+        notes = stage.get("notes", "").strip()
+        if notes:
+            lines.append(f"Notes: {notes}")
+
+        lines.append("")
+
+        for item in stage.get("items", []):
+            lines.append(f"- {item.get('text', '')}")
+            lines.append(f"Done: {'yes' if item.get('done') else 'no'}")
+
+            desc = item.get("description", "").strip()
+            if desc:
+                lines.append(f"Descript: {desc}")
+
+            lines.append("")
+
+        if s_total > 0 and s_done >= s_total:
+            lines.append("Completion Note: This stage/issue is fully complete.")
+            lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+# ── DevWise Git Learning / Done Status checklist patch ──────────────────────
+# Supports SentinelIR-style roadmap imports:
+# # Branch: feat/name
+# Notes: ...
+# ## Issue: Title
+# Status: COMPLETE
+# Progress: 1 / 2 tasks complete
+# - Task
+# Done: yes
+# Descript: details
+
+def _dw_truthy_done(value):
+    value = str(value or "").strip().lower()
+    return value in {"yes", "y", "true", "done", "complete", "completed", "1", "x"}
+
+
+def _dw_clean_task_text(text):
+    import re
+    text = str(text or "").strip()
+    text = re.sub(r"^\[[ xX]\]\s*", "", text)
+    return text.strip()
+
+
+def parse_markdown_roadmap(markdown_text):
+    import re
+
+    lines = (markdown_text or "").splitlines()
+    stages = []
+    current_branch = ""
+    current_stage = None
+    last_item = None
+    desc_mode = False
+    notes_mode = False
+
+    def start_stage(title, issue=False):
+        nonlocal current_stage, last_item, desc_mode, notes_mode
+
+        current_stage = new_stage(title.strip() or "Untitled")
+        current_stage["branch"] = current_branch
+
+        if issue:
+            current_stage["issue"] = title.strip() or "Untitled"
+
+        stages.append(current_stage)
+        last_item = None
+        desc_mode = False
+        notes_mode = False
+        return current_stage
+
+    def ensure_stage():
+        nonlocal current_stage
+        if current_stage is None:
+            return start_stage("General", issue=False)
+        return current_stage
+
+    def append_note(stage, value):
+        value = str(value or "").strip()
+        if not value:
+            return
+        current = stage.get("notes", "").strip()
+        stage["notes"] = (current + "\n" + value).strip() if current else value
+
+    def append_desc(item, value):
+        value = str(value or "").strip()
+        if not value:
+            return
+        current = item.get("description", "").strip()
+        item["description"] = (current + "\n" + value).strip() if current else value
+
+    for raw in lines:
+        line = raw.rstrip()
+        stripped = line.strip()
+
+        if not stripped:
+            desc_mode = False
+            notes_mode = False
+            continue
+
+        branch_match = re.match(r"^\s*#{1,6}\s*Branch\s*:\s*(.+)$", stripped, flags=re.I)
+        if branch_match:
+            current_branch = branch_match.group(1).strip()
+            current_stage = None
+            last_item = None
+            desc_mode = False
+            notes_mode = False
+            continue
+
+        issue_match = re.match(r"^\s*#{1,6}\s*Issue\s*:\s*(.+)$", stripped, flags=re.I)
+        if issue_match:
+            start_stage(issue_match.group(1), issue=True)
+            continue
+
+        heading_match = re.match(r"^\s*#{1,6}\s+(.+)$", stripped)
+        if heading_match:
+            title = heading_match.group(1).strip()
+            # Backwards compatibility: old headings become stages/issues.
+            start_stage(title, issue=False)
+            continue
+
+        notes_match = re.match(r"^\s*Notes?\s*:\s*(.*)$", stripped, flags=re.I)
+        if notes_match:
+            append_note(ensure_stage(), notes_match.group(1))
+            last_item = None
+            desc_mode = False
+            notes_mode = True
+            continue
+
+        status_match = re.match(r"^\s*Status\s*:\s*(.+)$", stripped, flags=re.I)
+        if status_match:
+            ensure_stage()["status"] = status_match.group(1).strip()
+            desc_mode = False
+            notes_mode = False
+            continue
+
+        progress_match = re.match(r"^\s*Progress\s*:\s*(.+)$", stripped, flags=re.I)
+        if progress_match:
+            # Stored only as source text. Real progress is calculated from tasks.
+            ensure_stage()["progress_text"] = progress_match.group(1).strip()
+            desc_mode = False
+            notes_mode = False
+            continue
+
+        done_match = re.match(r"^\s*Done\s*:\s*(.+)$", stripped, flags=re.I)
+        if done_match and last_item is not None:
+            last_item["done"] = _dw_truthy_done(done_match.group(1))
+            desc_mode = False
+            notes_mode = False
+            continue
+
+        descript_match = re.match(r"^\s*Descript\s*:\s*(.*)$", stripped, flags=re.I)
+        if descript_match and last_item is not None:
+            append_desc(last_item, descript_match.group(1))
+            desc_mode = True
+            notes_mode = False
+            continue
+
+        bullet_match = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+)$", stripped)
+        if bullet_match:
+            task = _dw_clean_task_text(bullet_match.group(1))
+            if task:
+                last_item = new_item(task)
+                ensure_stage().setdefault("items", []).append(last_item)
+            desc_mode = False
+            notes_mode = False
+            continue
+
+        if desc_mode and last_item is not None:
+            append_desc(last_item, stripped)
+            continue
+
+        if notes_mode and current_stage is not None:
+            append_note(current_stage, stripped)
+            continue
+
+        # Plain non-metadata text under a stage is treated as notes, not a random task.
+        append_note(ensure_stage(), stripped)
+
+    return stages
+
+
+def export_markdown(project_path, project_name="Project"):
+    data = get_project_data(project_path)
+    stages = data.get("stages", [])
+    lines = [f"# {project_name} — DevWise Checklist", ""]
+
+    last_branch = None
+
+    for stage in stages:
+        branch = stage.get("branch", "").strip()
+        issue = stage.get("issue", "").strip() or stage.get("title", "Untitled").strip()
+
+        if branch and branch != last_branch:
+            lines.extend([f"# Branch: {branch}", ""])
+            last_branch = branch
+
+        lines.append(f"## Issue: {issue}")
+
+        status = stage.get("status", "").strip()
+        if status:
+            lines.append(f"Status: {status}")
+
+        done, total = progress_for_stage(stage)
+        lines.append(f"Progress: {done} / {total} tasks complete")
+
+        notes = stage.get("notes", "").strip()
+        if notes:
+            lines.append(f"Notes: {notes}")
+
+        lines.append("")
+
+        for item in stage.get("items", []):
+            lines.append(f"- {item.get('text', '')}")
+            lines.append(f"Done: {'yes' if item.get('done') else 'no'}")
+
+            desc = item.get("description", "").strip()
+            if desc:
+                desc_lines = desc.splitlines()
+                lines.append(f"Descript: {desc_lines[0]}")
+                for extra in desc_lines[1:]:
+                    lines.append(extra)
+
+            lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+

@@ -1012,12 +1012,12 @@ Rules:
 
         hint = Gtk.Label()
         hint.set_markup(
-            "Paste a markdown roadmap below.\n"
-            "Headings (<tt>#</tt>, <tt>##</tt>, ...) become <b>stages</b>.\n"
-            "Use <tt>Notes:</tt> under a stage for stage-level notes.\n"
-            "Use bullet lines (<tt>- Task</tt>) or numbered lines for <b>checklist items</b>.\n"
-            "Use <tt>Descript:</tt> directly under a task for its <b>Task Description</b>.\n"
-            "Do not use checkbox syntax like <tt>[ ]</tt> or <tt>[x]</tt>."
+            "Paste a DevWise markdown roadmap below.\n"
+            "<tt># Branch:</tt> creates a workstream / Git branch.\n"
+            "<tt>## Issue:</tt> creates grouped work inside that branch.\n"
+            "Use bullet lines (<tt>- Task</tt>) for <b>checklist items</b>.\n"
+            "Use <tt>Done:</tt> and <tt>Descript:</tt> directly under tasks.\n"
+            "Supported format: <tt># Branch → ## Issue → - Task → Done: → Descript:</tt>."
         )
         hint.set_halign(Gtk.Align.START)
         hint.set_line_wrap(True)
@@ -1026,12 +1026,12 @@ Rules:
 
         prompt_row = Gtk.Box(spacing=6)
 
-        copy_prompt_btn = Gtk.Button(label="📋 Copy Markdown Checklist Format")
+        copy_prompt_btn = Gtk.Button(label="📋 Copy Branch/Issue Checklist Format")
         copy_prompt_btn.set_tooltip_text("Copy the markdown checklist format to clipboard")
         copy_prompt_btn.connect("clicked", self._copy_markdown_import_prompt)
         prompt_row.pack_start(copy_prompt_btn, False, False, 0)
 
-        example_lbl = Gtk.Label(label="Markdown format: # Stage → Notes: → - Task → Descript:")
+        example_lbl = Gtk.Label(label="Markdown format: # Branch → ## Issue → - Task → Done: → Descript:")
         example_lbl.set_halign(Gtk.Align.START)
         example_lbl.get_style_context().add_class("dim-label")
         prompt_row.pack_start(example_lbl, True, True, 0)
@@ -2209,4 +2209,240 @@ ChecklistWindow._dw_save_markdown_file = _dw_save_markdown_file
 ChecklistWindow._export_checklist = _dw_export_checklist_v2
 ChecklistWindow._markdown_import_prompt = _dw_markdown_import_prompt_v2
 ChecklistWindow._copy_markdown_import_prompt = _dw_copy_markdown_import_prompt_v2
+
+
+# ── DevWise completed-status update prompt patch ────────────────────────────
+def _dw_update_checklist_prompt_completed_status(self):
+    current = self._dw_current_checklist_markdown()
+
+    return (
+        "Update this DevWise checklist.\n\n"
+        "IMPORTANT OUTPUT RULE:\n"
+        "Return only one copyable markdown code block. No explanation outside it.\n\n"
+        "Goal:\n"
+        "- Keep useful existing branches, issues, stages, tasks and descriptions.\n"
+        "- Preserve completed work as completed context.\n"
+        "- Do not turn completed tasks back into outstanding tasks unless I explicitly ask.\n"
+        "- Add missing branches/issues/tasks where useful.\n"
+        "- Improve wording where helpful.\n"
+        "- Do not delete existing completed work unless it is clearly duplicated or I explicitly ask.\n\n"
+        "Status rules:\n"
+        "- Use Done: yes for tasks already completed.\n"
+        "- Use Done: no for tasks still outstanding.\n"
+        "- Use Stage Status: COMPLETE when every task in that stage/issue is done.\n"
+        "- Use Stage Status: IN PROGRESS when some tasks are done and some remain.\n"
+        "- Use Stage Status: NOT STARTED when no tasks are done yet.\n\n"
+        "Format to return:\n\n"
+        "# Branch: feat/example-branch\n"
+        "Notes: Optional branch/workstream context.\n\n"
+        "## Issue: Short issue title\n"
+        "Stage Status: IN PROGRESS\n"
+        "Stage Progress: 1 / 2 tasks complete\n"
+        "- Task name\n"
+        "Done: no\n"
+        "Descript: Useful detail for the task.\n\n"
+        "Rules:\n"
+        "- Use Branch → Issue → Task → Done → Descript format.\n"
+        "- Do not use checkbox syntax like [ ] or [x].\n"
+        "- Do not use tables.\n\n"
+        "Current checklist:\n\n"
+        "```markdown\n"
+        f"{current.rstrip()}\n"
+        "```\n"
+    )
+
+
+def _dw_markdown_import_prompt_completed_status(self):
+    project_name = os.path.basename(self.project_path) or "{project}"
+
+    return f"""Create or update a {project_name} DevWise checklist.
+
+IMPORTANT OUTPUT RULE:
+Return only one copyable markdown code block. No explanation outside it.
+
+Use this structure:
+
+# Branch: feat/example-branch
+Notes: Optional branch/workstream context.
+
+## Issue: Short issue title
+Stage Status: IN PROGRESS
+Stage Progress: 0 / 2 tasks complete
+
+- First task name
+Done: no
+Descript: Useful detail for this task.
+
+- Second task name
+Done: no
+Descript: Useful detail for this task.
+
+Rules:
+- Use Branch for the Git branch/workstream.
+- Use Issue for grouped work.
+- Use normal bullet points for tasks.
+- Use Done: yes/no under each task so completed work is preserved.
+- Use Descript: directly under a task for task description.
+- Do not use checkbox syntax like [ ] or [x].
+- If updating an existing checklist, keep useful existing work and add/improve rather than deleting.
+- Do not use tables.
+"""
+
+
+ChecklistWindow._dw_update_checklist_prompt = _dw_update_checklist_prompt_completed_status
+ChecklistWindow._markdown_import_prompt = _dw_markdown_import_prompt_completed_status
+
+
+# ── DevWise clean checklist AI prompt patch ─────────────────────────────────
+def _dw_update_checklist_prompt_clean(self):
+    current = self._dw_current_checklist_markdown()
+
+    return (
+        "Update this DevWise checklist.\n\n"
+        "IMPORTANT OUTPUT RULE:\n"
+        "Return only one clean markdown code block containing the updated checklist.\n"
+        "Do not include explanations, citations, Source Checklist lines, contentReference tags, oaicite tags, or tables.\n\n"
+        "Goal:\n"
+        "- Keep useful existing branches, issues, tasks, notes and descriptions.\n"
+        "- Preserve completed work as completed context.\n"
+        "- Do not turn Done: yes tasks back into Done: no tasks unless explicitly asked.\n"
+        "- Add missing tasks where useful.\n"
+        "- Improve wording where helpful.\n"
+        "- Do not delete completed work unless it is clearly duplicated.\n\n"
+        "Required format:\n\n"
+        "# Branch: feat/example-branch\n"
+        "Notes: Optional branch/workstream context.\n\n"
+        "## Issue: Short issue title\n"
+        "Status: IN PROGRESS\n"
+        "Progress: 1 / 2 tasks complete\n\n"
+        "- Task name\n"
+        "Done: no\n"
+        "Descript: Useful task description.\n\n"
+        "Rules:\n"
+        "- Every task must have Done: yes or Done: no.\n"
+        "- Every task should have Descript: directly underneath Done:.\n"
+        "- Use Branch → Issue → Task → Done → Descript.\n"
+        "- Do not use checkbox syntax like [ ] or [x].\n"
+        "- Do not include Source Checklist or contentReference lines.\n\n"
+        "Current checklist:\n\n"
+        "```markdown\n"
+        f"{current.rstrip()}\n"
+        "```\n"
+    )
+
+
+def _dw_markdown_import_prompt_clean(self):
+    project_name = os.path.basename(self.project_path) or "{project}"
+
+    return f"""Create or update a {project_name} DevWise checklist.
+
+IMPORTANT OUTPUT RULE:
+Return only one clean markdown code block.
+Do not include explanations, citations, Source Checklist lines, contentReference tags, oaicite tags, or tables.
+
+Use this exact structure:
+
+# Branch: feat/example-branch
+Notes: Optional branch/workstream context.
+
+## Issue: Short issue title
+Status: IN PROGRESS
+Progress: 0 / 2 tasks complete
+
+- First task name
+Done: no
+Descript: Useful detail for this task.
+
+- Second task name
+Done: no
+Descript: Useful detail for this task.
+
+Rules:
+- Use Branch for the Git branch/workstream.
+- Use Issue for grouped work.
+- Use normal bullet points for tasks.
+- Every task must include Done: yes/no.
+- Every task should include Descript: directly underneath Done:.
+- Do not use checkbox syntax like [ ] or [x].
+- If updating an existing checklist, keep useful existing work and add/improve rather than deleting.
+- Do not include Source Checklist or contentReference lines.
+- Do not use tables.
+"""
+
+
+ChecklistWindow._dw_update_checklist_prompt = _dw_update_checklist_prompt_clean
+ChecklistWindow._markdown_import_prompt = _dw_markdown_import_prompt_clean
+
+# Update visible helper label if the old one exists in the base UI.
+try:
+    ChecklistWindow._dw_clean_prompt_patch_applied = True
+except Exception:
+    pass
+
+
+# ── DevWise Git Learning checklist prompt patch ─────────────────────────────
+def _dw_branch_issue_import_prompt_with_done(self):
+    project_name = os.path.basename(self.project_path) or "{project}"
+
+    return f"""Create or update a {project_name} DevWise checklist.
+
+IMPORTANT OUTPUT RULE:
+Return only one copyable markdown code block. No explanation outside it.
+
+Use this exact structure:
+
+# Branch: feat/example-branch
+Notes: Optional branch/workstream context.
+
+## Issue: Short issue title
+Status: NOT STARTED
+Progress: 0 / 2 tasks complete
+
+- First task name
+Done: no
+Descript: Useful detail for this task.
+
+- Second task name
+Done: no
+Descript: Useful detail for this task.
+
+Rules:
+- Use Branch for the Git branch/workstream.
+- Use Issue for grouped work.
+- Use normal bullet points for tasks.
+- Use Done: yes or Done: no directly under each task.
+- Use Descript: directly under each task for task description.
+- If updating an existing checklist, keep useful existing work and add/improve rather than deleting.
+- Do not use checkbox syntax like [ ] or [x].
+- Do not use tables.
+"""
+
+
+def _dw_update_checklist_prompt_with_done(self):
+    current = checklists.export_markdown(
+        self.project_path,
+        os.path.basename(os.path.abspath(self.project_path)),
+    )
+
+    return (
+        "Update this DevWise checklist.\\n\\n"
+        "IMPORTANT OUTPUT RULE:\\n"
+        "Return only one copyable markdown code block. No explanation outside it.\\n\\n"
+        "Goal:\\n"
+        "- Keep useful existing branches, issues, tasks, Done values and descriptions.\\n"
+        "- Improve wording where helpful.\\n"
+        "- Add missing branches/issues/tasks if needed.\\n"
+        "- Do not delete existing work unless it is clearly duplicated or I explicitly ask.\\n"
+        "- Use Branch → Issue → Task → Done → Descript format.\\n"
+        "- Do not use checkbox syntax like [ ] or [x].\\n"
+        "- Do not use tables.\\n\\n"
+        "Current checklist:\\n\\n"
+        "```markdown\\n"
+        f"{current.rstrip()}\\n"
+        "```\\n"
+    )
+
+
+ChecklistWindow._markdown_import_prompt = _dw_branch_issue_import_prompt_with_done
+ChecklistWindow._dw_update_checklist_prompt = _dw_update_checklist_prompt_with_done
 

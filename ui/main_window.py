@@ -752,3 +752,62 @@ MainWindow._dw_current_project_path = _dw_current_project_path_safe
 MainWindow._dw_open_focus_mode = _dw_open_focus_mode_lazy
 MainWindow._dw_open_project_templates = _dw_open_project_templates_lazy
 
+
+# ── DevWise Git Learning Center menu patch ──────────────────────────────────
+def _dw_open_git_learning_center(self, _=None):
+    try:
+        if getattr(self, "_dw_git_learning_win", None) is not None and self._dw_git_learning_win.get_visible():
+            self._dw_git_learning_win.present()
+            return
+    except Exception:
+        self._dw_git_learning_win = None
+
+    try:
+        from ui.git_learning_window import GitLearningWindow
+        path = None
+        try:
+            path = self.commit_panel.project_path
+        except Exception:
+            pass
+
+        self._dw_git_learning_win = GitLearningWindow(self, path)
+        self._dw_git_learning_win.connect("destroy", lambda *_: setattr(self, "_dw_git_learning_win", None))
+        self._dw_git_learning_win.present()
+    except Exception as e:
+        try:
+            dlg = Gtk.MessageDialog(
+                transient_for=self,
+                flags=0,
+                message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.OK,
+                text="Git Learning Center failed to open",
+            )
+            dlg.format_secondary_text(str(e))
+            dlg.run()
+            dlg.destroy()
+        except Exception:
+            pass
+
+
+if not getattr(MainWindow, "_dw_git_learning_menu_patch_applied", False):
+    MainWindow._dw_git_learning_base_build_menubar = MainWindow._build_menubar
+
+    def _dw_git_learning_build_menubar(self):
+        menubar = MainWindow._dw_git_learning_base_build_menubar(self)
+
+        menu = Gtk.Menu()
+        root = Gtk.MenuItem(label="Learn")
+        root.set_submenu(menu)
+
+        git_item = Gtk.MenuItem(label="📚 Git Learning Center")
+        git_item.connect("activate", self._dw_open_git_learning_center)
+        menu.append(git_item)
+
+        menu.show_all()
+        menubar.append(root)
+        return menubar
+
+    MainWindow._build_menubar = _dw_git_learning_build_menubar
+    MainWindow._dw_open_git_learning_center = _dw_open_git_learning_center
+    MainWindow._dw_git_learning_menu_patch_applied = True
+
