@@ -3875,3 +3875,233 @@ if not getattr(ChecklistWindow, "_dw_clean_branch_click_patch_applied", False):
 
     ChecklistWindow._dw_clean_branch_click_patch_applied = True
 
+
+
+# ── DevWise live branch stats + empty placeholder cleanup patch ─────────────
+# Fixes:
+# - Branch header stats update immediately when ticking/unticking tasks.
+# - Old empty "General" stages from previous imports are removed automatically.
+# - Cleanup is persisted so the ghost General row does not come back after restart.
+# - Keeps the opened branch open after checkbox toggles.
+
+def _dw_is_empty_placeholder_stage_v3(self, stage):
+    title = str(stage.get("title", "") or "").strip().lower()
+    issue = str(stage.get("issue", "") or "").strip().lower()
+    notes = str(stage.get("notes", "") or "").strip()
+    branch_notes = str(stage.get("branch_notes", "") or "").strip()
+    items = stage.get("items", []) or []
+
+    placeholder_titles = {
+        "",
+        "general",
+        "untitled",
+        "untitled issue",
+        "untitled stage",
+    }
+
+    return (
+        title in placeholder_titles
+        and issue in placeholder_titles
+        and not items
+        and not notes
+        and not branch_notes
+    )
+
+
+def _dw_cleanup_empty_placeholder_stages_v3(self, save=True):
+    stages = self.project_data.get("stages", [])
+
+    if not stages:
+        return 0
+
+    cleaned = []
+    removed = 0
+
+    for stage in stages:
+        if self._dw_is_empty_placeholder_stage_v3(stage):
+            removed += 1
+            continue
+
+        cleaned.append(stage)
+
+    if removed:
+        self.project_data["stages"] = cleaned
+
+        if self.selected_stage_index is not None:
+            self.selected_stage_index = None
+            self.selected_item_index = None
+
+        if save:
+            try:
+                checklists.save_project_data(self.project_path, self.project_data)
+            except Exception:
+                pass
+
+    return removed
+
+
+def _dw_find_stage_row_live_v3(self, stage_index):
+    for row in self.stage_list.get_children():
+        if getattr(row, "stage_index", None) == stage_index:
+            return row
+
+    return None
+
+
+def _dw_reselect_stage_item_v3(self, stage_index, item_index=None):
+    stages = self.project_data.get("stages", [])
+
+    if not (0 <= stage_index < len(stages)):
+        self.selected_stage_index = None
+        self.selected_item_index = None
+        self._set_right_enabled(False)
+        return
+
+    row = self._dw_find_stage_row_live_v3(stage_index)
+
+    if row is not None:
+        try:
+            self.stage_list.unselect_all()
+        except Exception:
+            pass
+
+        self.stage_list.select_row(row)
+
+    self.selected_stage_index = stage_index
+    self.selected_item_index = None
+    self._set_right_enabled(True)
+    self._refresh_items_list()
+    self._refresh_stage_header()
+    self._load_notes()
+
+    if item_index is not None:
+        items = stages[stage_index].get("items", [])
+
+        if items:
+            item_index = max(0, min(int(item_index), len(items) - 1))
+            item_row = self.items_list.get_row_at_index(item_index)
+
+            if item_row is not None:
+                try:
+                    self.items_list.unselect_all()
+                except Exception:
+                    pass
+
+                self.items_list.select_row(item_row)
+                self.selected_item_index = item_index
+                self._load_task_description(item_index)
+
+
+def _dw_on_item_toggled_live_branch_stats_v3(self, check, index):
+    stage = self._current_stage()
+
+    if stage is None:
+        return
+
+    stage_index = self.selected_stage_index
+    item_index = index
+
+    items = stage.get("items", [])
+
+    if 0 <= index < len(items):
+        items[index]["done"] = check.get_active()
+
+    # Own idea: if the task tick makes this issue complete, keep the issue visible,
+    # but refresh the whole left tree so branch active count/status updates instantly.
+    try:
+        branch = str(stage.get("branch", "") or "").strip() or "No branch"
+        if hasattr(self, "_dw_collapsed_branches"):
+            self._dw_collapsed_branches.discard(branch)
+    except Exception:
+        pass
+
+    self._cleanup_empty_placeholder_stages_v3(save=False)
+
+    # Full left-side refresh is intentional here because branch headers are
+    # calculated from all child stages.
+    self._refresh_stage_list(keep_selection=True)
+
+    if stage_index is not None:
+        self._dw_reselect_stage_item_v3(stage_index, item_index)
+
+    self._update_overall_progress()
+    self._mark_dirty()
+
+
+def _dw_init_live_branch_stats_cleanup_v3(self, *args, **kwargs):
+    ChecklistWindow._dw_live_branch_stats_base_init(self, *args, **kwargs)
+
+    removed = self._cleanup_empty_placeholder_stages_v3(save=True)
+
+    if removed:
+        try:
+            self._refresh_stage_list(keep_selection=False)
+            self._set_right_enabled(False)
+            self._update_overall_progress()
+        except Exception:
+            pass
+
+        try:
+            self.statusbar.push(0, f"Removed {removed} empty placeholder stage(s).")
+        except Exception:
+            pass
+
+
+def _dw_refresh_stage_list_with_cleanup_v3(self, keep_selection=True):
+    self._cleanup_empty_placeholder_stages_v3(save=False)
+    return ChecklistWindow._dw_live_branch_stats_base_refresh_stage_list(self, keep_selection=keep_selection)
+
+
+def _dw_remove_empty_placeholders_menu_action_v3(self, *_):
+    removed = self._cleanup_empty_placeholder_stages_v3(save=True)
+    self._refresh_stage_list(keep_selection=False)
+    self._set_right_enabled(False)
+    self._update_overall_progress()
+
+    if removed:
+        self._show_info(f"Removed {removed} empty placeholder stage(s).")
+    else:
+        self._show_info("No empty placeholder stages found.")
+
+
+def _dw_on_stage_list_button_press_with_cleanup_menu_v3(self, widget, event):
+    # Keep all existing branch/stage right-click behaviour.
+    result = ChecklistWindow._dw_live_branch_stats_base_stage_button_press(self, widget, event)
+
+    # Ctrl + right-click empty area = cleanup shortcut.
+    try:
+        ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
+        row = self.stage_list.get_row_at_y(int(event.y))
+
+        if event.button == 3 and ctrl and row is None:
+            menu = Gtk.Menu()
+            item = Gtk.MenuItem(label="🧹 Remove empty placeholder stages")
+            item.connect("activate", self._dw_remove_empty_placeholders_menu_action_v3)
+            menu.append(item)
+            menu.show_all()
+            menu.popup_at_pointer(event)
+            return True
+    except Exception:
+        pass
+
+    return result
+
+
+if not getattr(ChecklistWindow, "_dw_live_branch_stats_cleanup_patch_applied", False):
+    ChecklistWindow._dw_live_branch_stats_base_init = ChecklistWindow.__init__
+    ChecklistWindow._dw_live_branch_stats_base_refresh_stage_list = ChecklistWindow._refresh_stage_list
+    ChecklistWindow._dw_live_branch_stats_base_stage_button_press = ChecklistWindow._on_stage_list_button_press
+
+    ChecklistWindow._dw_is_empty_placeholder_stage_v3 = _dw_is_empty_placeholder_stage_v3
+    ChecklistWindow._cleanup_empty_placeholder_stages_v3 = _dw_cleanup_empty_placeholder_stages_v3
+    ChecklistWindow._dw_find_stage_row_live_v3 = _dw_find_stage_row_live_v3
+    ChecklistWindow._dw_reselect_stage_item_v3 = _dw_reselect_stage_item_v3
+    ChecklistWindow._dw_remove_empty_placeholders_menu_action_v3 = _dw_remove_empty_placeholders_menu_action_v3
+
+    ChecklistWindow.__init__ = _dw_init_live_branch_stats_cleanup_v3
+    ChecklistWindow._refresh_stage_list = _dw_refresh_stage_list_with_cleanup_v3
+    ChecklistWindow._on_item_toggled = _dw_on_item_toggled_live_branch_stats_v3
+    ChecklistWindow._on_stage_list_button_press = _dw_on_stage_list_button_press_with_cleanup_menu_v3
+
+    ChecklistWindow._dw_live_branch_stats_cleanup_patch_applied = True
+
