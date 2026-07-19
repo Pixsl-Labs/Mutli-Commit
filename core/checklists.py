@@ -1277,3 +1277,308 @@ def dw_update_prompt_active(project_path, project_name="Project"):
         "\n```\n"
     )
 
+
+# ── DevWise branch container parser/export patch ────────────────────────────
+def _dw_norm_bool(value):
+    value = str(value or "").strip().lower()
+    return value in {"yes", "y", "true", "done", "complete", "completed", "1", "x"}
+
+
+def _dw_calc_status(done, total):
+    if total <= 0:
+        return "EMPTY"
+    if done <= 0:
+        return "NOT STARTED"
+    if done >= total:
+        return "COMPLETE"
+    return "IN PROGRESS"
+
+
+def _dw_clean_heading_title(title):
+    import re
+    title = str(title or "").strip()
+    title = re.sub(r"\s*\(\d+\s*/\s*\d+\)\s*$", "", title).strip()
+    return title
+
+
+def _dw_clean_task_text(raw):
+    import re
+    text = str(raw or "").strip()
+    text = re.sub(r"^\[[ xX]\]\s*", "", text)
+    return text.strip()
+
+
+def parse_markdown_roadmap(markdown_text):
+    """
+    Final DevWise roadmap parser.
+
+    Key rule:
+    # Branch: x is a container only. It never creates a blank stage by itself.
+    Stages/issues only begin at ## Issue: or ## Stage: headings.
+    """
+    import re
+
+    stages = []
+    current_branch = ""
+    current_branch_notes = ""
+    current_stage = None
+    last_item = None
+    desc_mode = False
+    notes_mode = False
+    ignore_rest = False
+
+    def is_junk_line(line):
+        lowered = line.strip().lower()
+        return (
+            not lowered
+            or lowered.startswith("contentreference")
+            or lowered.startswith("source:")
+            or lowered.startswith("oaicite")
+            or lowered.startswith("")
+            or lowered in {"```", "```markdown", "```text"}
+        )
+
+    def append_text(existing, value):
+        value = str(value or "").strip()
+        if not value:
+            return existing or ""
+        existing = str(existing or "").strip()
+        return (existing + "\n" + value).strip() if existing else value
+
+    def start_stage(title, kind="Issue"):
+        nonlocal current_stage, last_item, desc_mode, notes_mode
+
+        clean_title = _dw_clean_heading_title(title) or "Untitled"
+        current_stage = new_stage(clean_title)
+        current_stage["branch"] = current_branch
+        current_stage["issue"] = clean_title if kind.lower() == "issue" else ""
+        current_stage["kind"] = kind
+
+        if current_branch_notes:
+            current_stage["branch_notes"] = current_branch_notes
+
+        stages.append(current_stage)
+        last_item = None
+        desc_mode = False
+        notes_mode = False
+        return current_stage
+
+    for raw in (markdown_text or "").splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+
+        if is_junk_line(stripped):
+            desc_mode = False
+            notes_mode = False
+            continue
+
+        if stripped == "---":
+            ignore_rest = True
+            continue
+
+        if "completed summary" in stripped.lower():
+            ignore_rest = True
+            continue
+
+        branch_match = re.match(r"^\s*#{1,6}\s*Branch\s*:\s*(.+)$", stripped, flags=re.I)
+        if branch_match:
+            ignore_rest = False
+            current_branch = branch_match.group(1).strip()
+            current_branch_notes = ""
+            current_stage = None
+            last_item = None
+            desc_mode = False
+            notes_mode = False
+            continue
+
+        if ignore_rest:
+            continue
+
+        # Ignore document title headings, not real work stages.
+        if re.match(r"^\s*#\s+.+?(Checklist|Active DevWise Checklist|Current Checklist)\s*$", stripped, flags=re.I):
+            current_stage = None
+            last_item = None
+            continue
+
+        issue_match = re.match(r"^\s*#{1,6}\s*Issue\s*:\s*(.+)$", stripped, flags=re.I)
+        if issue_match:
+            start_stage(issue_match.group(1), "Issue")
+            continue
+
+        stage_match = re.match(r"^\s*#{1,6}\s*Stage\s*:\s*(.+)$", stripped, flags=re.I)
+        if stage_match:
+            start_stage(stage_match.group(1), "Stage")
+            continue
+
+        # Backwards compatibility: non-branch headings below h2 become stages.
+        generic_heading = re.match(r"^\s*#{2,6}\s+(.+)$", stripped)
+        if generic_heading:
+            title = generic_heading.group(1).strip()
+            if title and not title.lower().startswith(("export notes", "rules", "current active checklist context")):
+                start_stage(title, "Stage")
+            continue
+
+        notes_match = re.match(r"^\s*Notes?\s*:\s*(.*)$", stripped, flags=re.I)
+        if notes_match:
+            value = notes_match.group(1).strip()
+
+            if current_stage is None:
+                current_branch_notes = append_text(current_branch_notes, value)
+            else:
+                current_stage["notes"] = append_text(current_stage.get("notes", ""), value)
+
+            last_item = None
+            desc_mode = False
+            notes_mode = True
+            continue
+
+        status_match = re.match(r"^\s*(?:Stage\s+)?Status\s*:\s*(.+)$", stripped, flags=re.I)
+        if status_match and current_stage is not None:
+            current_stage["status"] = status_match.group(1).strip()
+            desc_mode = False
+            notes_mode = False
+            continue
+
+        progress_match = re.match(r"^\s*(?:Stage\s+)?Progress\s*:\s*(.+)$", stripped, flags=re.I)
+        if progress_match and current_stage is not None:
+            current_stage["progress_text"] = progress_match.group(1).strip()
+            desc_mode = False
+            notes_mode = False
+            continue
+
+        done_match = re.match(r"^\s*Done\s*:\s*(.+)$", stripped, flags=re.I)
+        if done_match and last_item is not None:
+            last_item["done"] = _dw_norm_bool(done_match.group(1))
+            desc_mode = False
+            notes_mode = False
+            continue
+
+        descript_match = re.match(r"^\s*Descript\s*:\s*(.*)$", stripped, flags=re.I)
+        if descript_match and last_item is not None:
+            last_item["description"] = append_text(last_item.get("description", ""), descript_match.group(1))
+            desc_mode = True
+            notes_mode = False
+            continue
+
+        bullet_match = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+)$", stripped)
+        if bullet_match:
+            # Important: do not create a fake stage from bullets under branch notes or completed summary.
+            if current_stage is None:
+                current_branch_notes = append_text(current_branch_notes, _dw_clean_task_text(bullet_match.group(1)))
+                continue
+
+            task = _dw_clean_task_text(bullet_match.group(1))
+            if task:
+                last_item = new_item(task)
+                current_stage.setdefault("items", []).append(last_item)
+
+            desc_mode = False
+            notes_mode = False
+            continue
+
+        if desc_mode and last_item is not None:
+            last_item["description"] = append_text(last_item.get("description", ""), stripped)
+            continue
+
+        if notes_mode:
+            if current_stage is None:
+                current_branch_notes = append_text(current_branch_notes, stripped)
+            else:
+                current_stage["notes"] = append_text(current_stage.get("notes", ""), stripped)
+            continue
+
+        # Plain text under a branch but before an issue is branch notes, not an empty stage.
+        if current_stage is None:
+            current_branch_notes = append_text(current_branch_notes, stripped)
+        else:
+            current_stage["notes"] = append_text(current_stage.get("notes", ""), stripped)
+
+    # Remove truly empty accidental stages if any older import created them.
+    cleaned = []
+    for stage in stages:
+        title = str(stage.get("title", "")).strip().lower()
+        has_items = bool(stage.get("items"))
+        has_notes = bool(str(stage.get("notes", "")).strip())
+        has_issue = bool(str(stage.get("issue", "")).strip())
+
+        if title in {"general", "untitled", "untitled stage"} and not has_items and not has_notes and not has_issue:
+            continue
+
+        cleaned.append(stage)
+
+    return cleaned
+
+
+def dw_branch_display_name(stage):
+    branch = str(stage.get("branch", "") or "").strip()
+    return branch if branch else "No branch"
+
+
+def dw_stage_display_title(stage):
+    return (
+        str(stage.get("issue", "") or "").strip()
+        or str(stage.get("title", "") or "").strip()
+        or "Untitled"
+    )
+
+
+def export_markdown(project_path, project_name="Project"):
+    data = get_project_data(project_path)
+    stages = data.get("stages", [])
+    done, total = progress_for_project(data)
+
+    lines = [
+        f"# {project_name} — Current Checklist",
+        "",
+        f"Overall Status: {_dw_calc_status(done, total)}",
+        f"Overall Progress: {done} / {total} tasks complete",
+        "",
+    ]
+
+    last_branch = object()
+
+    for stage in stages:
+        branch = str(stage.get("branch", "") or "").strip()
+        s_done, s_total = progress_for_stage(stage)
+        status = _dw_calc_status(s_done, s_total)
+
+        if branch and branch != last_branch:
+            lines.append(f"# Branch: {branch}")
+            branch_notes = str(stage.get("branch_notes", "") or "").strip()
+            if branch_notes:
+                lines.append(f"Notes: {branch_notes}")
+            lines.append("")
+            last_branch = branch
+
+        issue = str(stage.get("issue", "") or "").strip()
+        title = dw_stage_display_title(stage)
+
+        if issue:
+            lines.append(f"## Issue: {title}")
+        else:
+            lines.append(f"## Stage: {title}")
+
+        lines.append(f"Status: {status}")
+        lines.append(f"Progress: {s_done} / {s_total} tasks complete")
+
+        notes = str(stage.get("notes", "") or "").strip()
+        if notes:
+            lines.append(f"Notes: {notes}")
+
+        lines.append("")
+
+        for item in stage.get("items", []):
+            lines.append(f"- {item.get('text', '')}")
+            lines.append(f"Done: {'yes' if item.get('done') else 'no'}")
+
+            desc = str(item.get("description", "") or "").strip()
+            if desc:
+                desc_lines = desc.splitlines()
+                lines.append(f"Descript: {desc_lines[0]}")
+                for extra in desc_lines[1:]:
+                    lines.append(extra)
+
+            lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+

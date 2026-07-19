@@ -2631,3 +2631,391 @@ ChecklistWindow._dw_save_named_markdown_file = _dw_save_named_markdown_file
 ChecklistWindow._export_checklist = _dw_export_checklist_v3
 ChecklistWindow._markdown_import_prompt = _dw_markdown_import_prompt_active_default
 
+
+# ── DevWise branch-section checklist sidebar patch ──────────────────────────
+def _dw_prompt_subject(self):
+    project_name = os.path.basename(os.path.abspath(self.project_path)) or "this project"
+
+    if project_name.strip().lower() == "devwise":
+        return "DevWise checklist"
+
+    return f"{project_name} DevWise checklist"
+
+
+def _dw_markdown_import_prompt_branch_sections(self):
+    subject = self._dw_prompt_subject()
+
+    return f"""Create or update a {subject}.
+
+IMPORTANT OUTPUT RULE:
+Return only one clean markdown code block. No explanation outside it.
+Do not include citations, source labels, contentReference tags, oaicite tags, or tables.
+
+Use this exact structure:
+
+# Branch: feat/example-branch
+Notes: Optional branch/workstream context.
+
+## Issue: Short issue title
+Status: IN PROGRESS
+Progress: 0 / 2 tasks complete
+
+- First task name
+Done: no
+Descript: Useful detail for this task.
+
+- Second task name
+Done: no
+Descript: Useful detail for this task.
+
+Rules:
+- Use Branch for the Git branch/workstream.
+- Use Issue for grouped work.
+- Use normal bullet points for tasks.
+- Use Done: yes or Done: no under each task.
+- Use Descript: directly under each task for task description.
+- If updating an existing checklist, focus on active/incomplete work.
+- Keep completed work only as completed context unless I explicitly ask for full completed tasks.
+- Do not use checkbox syntax like [ ] or [x].
+"""
+
+
+def _dw_branch_key_for_stage(self, stage):
+    return str(stage.get("branch", "") or "").strip() or "No branch"
+
+
+def _dw_branch_groups(self):
+    groups = []
+    lookup = {}
+
+    for index, stage in enumerate(self.project_data.get("stages", [])):
+        branch = self._dw_branch_key_for_stage(stage)
+
+        if branch not in lookup:
+            group = {
+                "branch": branch,
+                "indexes": [],
+                "done": 0,
+                "total": 0,
+            }
+            lookup[branch] = group
+            groups.append(group)
+
+        d, t = checklists.progress_for_stage(stage)
+        lookup[branch]["indexes"].append(index)
+        lookup[branch]["done"] += d
+        lookup[branch]["total"] += t
+
+    return groups
+
+
+def _dw_collapsed_set(self):
+    if not hasattr(self, "_dw_collapsed_branches"):
+        self._dw_collapsed_branches = set()
+    return self._dw_collapsed_branches
+
+
+def _dw_make_branch_header_row(self, group):
+    row = Gtk.ListBoxRow()
+    row.set_selectable(False)
+    row.is_branch_header = True
+    row.branch_key = group["branch"]
+
+    collapsed = group["branch"] in self._dw_collapsed_set()
+    arrow = "▸" if collapsed else "▾"
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+    box = Gtk.Box(spacing=6)
+    box.set_border_width(7)
+
+    btn = Gtk.Button(label=arrow)
+    btn.set_relief(Gtk.ReliefStyle.NONE)
+    btn.set_tooltip_text("Collapse / expand this branch")
+    btn.connect("clicked", lambda _btn, b=group["branch"]: self._dw_toggle_branch(b))
+    box.pack_start(btn, False, False, 0)
+
+    title = Gtk.Label()
+    title.set_markup(f"<b>{group['branch']}</b>")
+    title.set_halign(Gtk.Align.START)
+    title.set_ellipsize(Pango.EllipsizeMode.END)
+    box.pack_start(title, True, True, 0)
+
+    issue_count = len(group["indexes"])
+    done = group["done"]
+    total = group["total"]
+    status = "EMPTY" if total == 0 else ("COMPLETE" if done >= total else ("NOT STARTED" if done == 0 else "IN PROGRESS"))
+
+    summary = Gtk.Label(label=f"{issue_count} issue(s) • {done}/{total} • {status}")
+    summary.set_halign(Gtk.Align.END)
+    summary.get_style_context().add_class("stage-progress")
+    box.pack_end(summary, False, False, 0)
+
+    outer.pack_start(box, False, False, 0)
+    row.add(outer)
+    return row
+
+
+def _dw_toggle_branch(self, branch):
+    collapsed = self._dw_collapsed_set()
+
+    if branch in collapsed:
+        collapsed.remove(branch)
+    else:
+        collapsed.add(branch)
+
+    self._refresh_stage_list(keep_selection=True)
+
+
+def _dw_find_stage_row(self, stage_index):
+    try:
+        wanted = int(stage_index)
+    except Exception:
+        return None
+
+    for row in self.stage_list.get_children():
+        if getattr(row, "stage_index", None) == wanted:
+            return row
+
+    return None
+
+
+def _dw_refresh_stage_list_branch_grouped(self, keep_selection=True):
+    prev_index = self.selected_stage_index
+
+    stages = self.project_data.get("stages", [])
+
+    # If the selected stage exists inside a collapsed branch, auto-open that branch.
+    if keep_selection and prev_index is not None and 0 <= prev_index < len(stages):
+        selected_branch = self._dw_branch_key_for_stage(stages[prev_index])
+        self._dw_collapsed_set().discard(selected_branch)
+
+    for child in self.stage_list.get_children():
+        self.stage_list.remove(child)
+
+    if not stages:
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        lbl = Gtk.Label(label="No stages yet.\nUse 'Add Stage' or import a roadmap.")
+        lbl.set_justify(Gtk.Justification.CENTER)
+        lbl.set_margin_top(16)
+        row.add(lbl)
+        self.stage_list.add(row)
+    else:
+        for group in self._dw_branch_groups():
+            self.stage_list.add(self._dw_make_branch_header_row(group))
+
+            if group["branch"] in self._dw_collapsed_set():
+                continue
+
+            for stage_index in group["indexes"]:
+                row = self._make_stage_row(stage_index, stages[stage_index])
+
+                try:
+                    child = row.get_child()
+                    if child is not None:
+                        child.set_margin_start(18)
+                except Exception:
+                    pass
+
+                self.stage_list.add(row)
+
+    self.stage_list.show_all()
+    self._update_overall_progress()
+
+    if keep_selection and prev_index is not None:
+        row = self._dw_find_stage_row(prev_index)
+        if row is not None:
+            self.stage_list.select_row(row)
+            return
+
+    first_stage_row = None
+    for row in self.stage_list.get_children():
+        if hasattr(row, "stage_index"):
+            first_stage_row = row
+            break
+
+    if first_stage_row is not None:
+        self.stage_list.select_row(first_stage_row)
+    else:
+        self.selected_stage_index = None
+        self._set_right_enabled(False)
+
+
+def _dw_make_stage_row_branch_aware(self, index, stage):
+    # Use whatever _make_stage_row implementation existed before this patch.
+    row = ChecklistWindow._dw_branch_group_base_make_stage_row(self, index, stage)
+
+    try:
+        child = row.get_child()
+        if child is not None:
+            branch = str(stage.get("branch", "") or "").strip()
+            issue = str(stage.get("issue", "") or "").strip()
+
+            tooltip_parts = []
+            if branch:
+                tooltip_parts.append(f"Branch: {branch}")
+            if issue:
+                tooltip_parts.append(f"Issue: {issue}")
+
+            done, total = checklists.progress_for_stage(stage)
+            tooltip_parts.append(f"Progress: {done}/{total}")
+
+            row.set_tooltip_text("\n".join(tooltip_parts))
+    except Exception:
+        pass
+
+    return row
+
+
+def _dw_add_stage_branch_default(self, _):
+    dlg = Gtk.Dialog(title="Add Issue / Stage", transient_for=self, flags=0)
+    dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                    Gtk.STOCK_OK, Gtk.ResponseType.OK)
+    box = dlg.get_content_area()
+    box.set_border_width(12)
+    box.set_spacing(8)
+
+    branch_lbl = Gtk.Label(label="Branch / workstream:")
+    branch_lbl.set_halign(Gtk.Align.START)
+    box.pack_start(branch_lbl, False, False, 0)
+
+    branch_entry = Gtk.Entry()
+    branch_entry.set_placeholder_text("e.g. feat/checklist-polish")
+    try:
+        stage = self._current_stage()
+        if stage and stage.get("branch"):
+            branch_entry.set_text(stage.get("branch", ""))
+    except Exception:
+        pass
+    box.pack_start(branch_entry, False, False, 0)
+
+    title_lbl = Gtk.Label(label="Issue / stage title:")
+    title_lbl.set_halign(Gtk.Align.START)
+    box.pack_start(title_lbl, False, False, 0)
+
+    entry = Gtk.Entry()
+    entry.set_activates_default(True)
+    entry.set_placeholder_text("e.g. Fix empty branch stage import")
+    box.pack_start(entry, False, False, 0)
+
+    dlg.set_default_response(Gtk.ResponseType.OK)
+    dlg.show_all()
+
+    if dlg.run() == Gtk.ResponseType.OK:
+        title = entry.get_text().strip()
+        branch = branch_entry.get_text().strip()
+
+        if title:
+            stage = checklists.new_stage(title)
+            stage["issue"] = title
+            stage["kind"] = "Issue"
+            if branch:
+                stage["branch"] = branch
+
+            self.project_data.setdefault("stages", []).append(stage)
+            self.selected_stage_index = len(self.project_data["stages"]) - 1
+            self._dw_collapsed_set().discard(branch or "No branch")
+            self._refresh_stage_list()
+            self._mark_dirty()
+
+    dlg.destroy()
+
+
+def _dw_restore_resume_branch_aware(self):
+    try:
+        key = self._mc_resume_key()
+        store = _mc_resume_store()
+        saved = store.get(key)
+    except Exception:
+        saved = None
+
+    if not saved:
+        return False
+
+    stages = self.project_data.get("stages", [])
+
+    if not stages:
+        return False
+
+    try:
+        stage_index = int(saved.get("stage", 0))
+    except Exception:
+        stage_index = 0
+
+    stage_index = max(0, min(stage_index, len(stages) - 1))
+    branch = self._dw_branch_key_for_stage(stages[stage_index])
+    self._dw_collapsed_set().discard(branch)
+
+    row = self._dw_find_stage_row(stage_index)
+
+    if row is None:
+        self._refresh_stage_list(keep_selection=False)
+        row = self._dw_find_stage_row(stage_index)
+
+    if row is not None:
+        try:
+            self.stage_list.unselect_all()
+        except Exception:
+            pass
+        self.stage_list.select_row(row)
+
+    try:
+        self.selected_stage_index = stage_index
+        self.selected_item_index = None
+        self._set_right_enabled(True)
+        self._refresh_items_list()
+        self._refresh_stage_header()
+        self._load_notes()
+    except Exception:
+        pass
+
+    raw_item = saved.get("item", None)
+
+    try:
+        item_index = int(raw_item) if raw_item is not None else None
+    except Exception:
+        item_index = None
+
+    if item_index is not None:
+        items = stages[stage_index].get("items", [])
+        if items:
+            item_index = max(0, min(item_index, len(items) - 1))
+            item_row = self.items_list.get_row_at_index(item_index)
+
+            if item_row is not None:
+                try:
+                    self.items_list.unselect_all()
+                except Exception:
+                    pass
+                self.items_list.select_row(item_row)
+                self.selected_item_index = item_index
+                self._load_task_description(item_index)
+
+    return False
+
+
+if not getattr(ChecklistWindow, "_dw_branch_section_sidebar_patch_applied", False):
+    ChecklistWindow._dw_branch_group_base_refresh_stage_list = ChecklistWindow._refresh_stage_list
+    ChecklistWindow._dw_branch_group_base_make_stage_row = ChecklistWindow._make_stage_row
+    ChecklistWindow._dw_branch_group_base_add_stage = ChecklistWindow._add_stage
+
+    ChecklistWindow._dw_prompt_subject = _dw_prompt_subject
+    ChecklistWindow._markdown_import_prompt = _dw_markdown_import_prompt_branch_sections
+
+    ChecklistWindow._dw_branch_key_for_stage = _dw_branch_key_for_stage
+    ChecklistWindow._dw_branch_groups = _dw_branch_groups
+    ChecklistWindow._dw_collapsed_set = _dw_collapsed_set
+    ChecklistWindow._dw_make_branch_header_row = _dw_make_branch_header_row
+    ChecklistWindow._dw_toggle_branch = _dw_toggle_branch
+    ChecklistWindow._dw_find_stage_row = _dw_find_stage_row
+
+    ChecklistWindow._refresh_stage_list = _dw_refresh_stage_list_branch_grouped
+    ChecklistWindow._make_stage_row = _dw_make_stage_row_branch_aware
+    ChecklistWindow._add_stage = _dw_add_stage_branch_default
+
+    if hasattr(ChecklistWindow, "_mc_restore_resume"):
+        ChecklistWindow._mc_restore_resume = _dw_restore_resume_branch_aware
+
+    ChecklistWindow._dw_branch_section_sidebar_patch_applied = True
+
