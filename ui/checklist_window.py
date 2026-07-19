@@ -3471,3 +3471,407 @@ if not getattr(ChecklistWindow, "_dw_branch_click_anywhere_patch_applied", False
 
     ChecklistWindow._dw_branch_click_anywhere_patch_applied = True
 
+
+
+# ── DevWise branch row click + clean icons patch ────────────────────────────
+# Fixes:
+# - Branches open closed by default.
+# - Click anywhere on branch header row to open/close.
+# - Branch names no longer collapse to "...".
+# - Removes the confusing green leaf metadata icon from issue rows.
+# - Uses clean status icons for issue/stage rows.
+
+def _dw_all_branch_keys_clean(self):
+    keys = []
+
+    for stage in self.project_data.get("stages", []):
+        branch = str(stage.get("branch", "") or "").strip() or "No branch"
+
+        if branch not in keys:
+            keys.append(branch)
+
+    return keys
+
+
+def _dw_collapsed_set_clean(self):
+    branches = set(self._dw_all_branch_keys_clean())
+
+    # First load of this checklist window: every branch starts closed.
+    if not hasattr(self, "_dw_branch_closed_state_ready"):
+        self._dw_collapsed_branches = set(branches)
+        self._dw_seen_branch_keys = set(branches)
+        self._dw_branch_closed_state_ready = True
+        return self._dw_collapsed_branches
+
+    if not hasattr(self, "_dw_collapsed_branches"):
+        self._dw_collapsed_branches = set(branches)
+
+    if not hasattr(self, "_dw_seen_branch_keys"):
+        self._dw_seen_branch_keys = set()
+
+    # Newly imported branches start closed too.
+    new_branches = branches - self._dw_seen_branch_keys
+    self._dw_collapsed_branches.update(new_branches)
+
+    self._dw_seen_branch_keys = set(branches)
+    self._dw_collapsed_branches.intersection_update(branches)
+
+    return self._dw_collapsed_branches
+
+
+def _dw_branch_key_clean(self, stage):
+    return str(stage.get("branch", "") or "").strip() or "No branch"
+
+
+def _dw_branch_groups_clean(self):
+    groups = []
+    lookup = {}
+
+    for index, stage in enumerate(self.project_data.get("stages", [])):
+        branch = self._dw_branch_key_clean(stage)
+
+        if branch not in lookup:
+            lookup[branch] = {
+                "branch": branch,
+                "indexes": [],
+                "done": 0,
+                "total": 0,
+            }
+            groups.append(lookup[branch])
+
+        done, total = checklists.progress_for_stage(stage)
+        lookup[branch]["indexes"].append(index)
+        lookup[branch]["done"] += done
+        lookup[branch]["total"] += total
+
+    # Own idea: active branches first, completed branches last.
+    def sort_key(group):
+        total = group["total"]
+        done = group["done"]
+        complete = total > 0 and done >= total
+        no_work = total <= 0
+        return (complete, no_work, group["branch"].lower())
+
+    return sorted(groups, key=sort_key)
+
+
+def _dw_status_label_clean(done, total):
+    if total <= 0:
+        return "EMPTY"
+    if done <= 0:
+        return "NOT STARTED"
+    if done >= total:
+        return "COMPLETE"
+    return "IN PROGRESS"
+
+
+def _dw_status_icon_clean(done, total):
+    status = _dw_status_label_clean(done, total)
+
+    return {
+        "COMPLETE": "✅",
+        "IN PROGRESS": "🟡",
+        "NOT STARTED": "🔵",
+        "EMPTY": "⚪",
+    }.get(status, "⚪")
+
+
+def _dw_make_branch_header_row_clean(self, group):
+    row = Gtk.ListBoxRow()
+    row.set_selectable(False)
+    row.is_branch_header = True
+    row.branch_key = group["branch"]
+
+    collapsed = group["branch"] in self._dw_collapsed_set_clean()
+    folder = "📁" if collapsed else "📂"
+
+    done = group["done"]
+    total = group["total"]
+    active = max(0, total - done)
+    status = _dw_status_label_clean(done, total)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+    outer.set_border_width(8)
+
+    title = Gtk.Label(label=f"{folder} {group['branch']}")
+    title.set_halign(Gtk.Align.START)
+    title.set_xalign(0.0)
+    title.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+    title.get_style_context().add_class("stage-title")
+    outer.pack_start(title, False, False, 0)
+
+    summary = Gtk.Label(
+        label=f"{len(group['indexes'])} issue(s) • {active} active • {done}/{total} complete • {status}"
+    )
+    summary.set_halign(Gtk.Align.START)
+    summary.set_xalign(0.0)
+    summary.set_ellipsize(Pango.EllipsizeMode.END)
+    summary.get_style_context().add_class("stage-progress")
+    outer.pack_start(summary, False, False, 0)
+
+    row.set_tooltip_text("Click anywhere on this branch row to open/close it.\nRight-click for branch actions.")
+    row.add(outer)
+    return row
+
+
+def _dw_make_stage_row_clean_icons(self, index, stage):
+    row = Gtk.ListBoxRow()
+    row.stage_index = index
+    row.get_style_context().add_class("stage-row")
+
+    vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+    vbox.set_border_width(8)
+    vbox.set_margin_start(18)
+
+    done, total = checklists.progress_for_stage(stage)
+    status = _dw_status_label_clean(done, total)
+    icon = _dw_status_icon_clean(done, total)
+
+    title_text = stage.get("issue") or stage.get("title") or "Untitled"
+    title_lbl = Gtk.Label(label=f"{icon} {title_text}")
+    title_lbl.set_halign(Gtk.Align.START)
+    title_lbl.set_xalign(0.0)
+    title_lbl.set_line_wrap(True)
+    title_lbl.get_style_context().add_class("stage-title")
+    vbox.pack_start(title_lbl, False, False, 0)
+
+    prog_lbl = Gtk.Label(label=f"{done} / {total} complete • {status}")
+    prog_lbl.set_halign(Gtk.Align.START)
+    prog_lbl.set_xalign(0.0)
+    prog_lbl.get_style_context().add_class("stage-progress")
+    vbox.pack_start(prog_lbl, False, False, 0)
+
+    # Replaces the old green leaf line with a subtle plain text cue.
+    branch = str(stage.get("branch", "") or "").strip()
+    issue = str(stage.get("issue", "") or "").strip()
+
+    if branch or issue:
+        meta = Gtk.Label(label=f"↳ {issue or title_text}")
+        meta.set_halign(Gtk.Align.START)
+        meta.set_xalign(0.0)
+        meta.set_ellipsize(Pango.EllipsizeMode.END)
+        meta.get_style_context().add_class("stage-progress")
+        vbox.pack_start(meta, False, False, 0)
+
+    row.set_tooltip_text(
+        f"Branch: {branch or 'No branch'}\n"
+        f"Issue: {issue or title_text}\n"
+        f"Progress: {done}/{total}\n"
+        f"Status: {status}"
+    )
+
+    row.add(vbox)
+    return row
+
+
+def _dw_find_stage_row_clean(self, stage_index):
+    for row in self.stage_list.get_children():
+        if getattr(row, "stage_index", None) == stage_index:
+            return row
+
+    return None
+
+
+def _dw_set_no_stage_selected_clean(self):
+    self.selected_stage_index = None
+    self.selected_item_index = None
+    self._set_right_enabled(False)
+
+
+def _dw_refresh_stage_list_clean(self, keep_selection=True):
+    prev_index = self.selected_stage_index
+    stages = self.project_data.get("stages", [])
+
+    for child in self.stage_list.get_children():
+        self.stage_list.remove(child)
+
+    if not stages:
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        lbl = Gtk.Label(label="No stages yet.\nUse 'Add Stage' or import a roadmap.")
+        lbl.set_justify(Gtk.Justification.CENTER)
+        lbl.set_margin_top(16)
+        row.add(lbl)
+        self.stage_list.add(row)
+    else:
+        for group in self._dw_branch_groups_clean():
+            self.stage_list.add(self._dw_make_branch_header_row_clean(group))
+
+            if group["branch"] in self._dw_collapsed_set_clean():
+                continue
+
+            for stage_index in group["indexes"]:
+                self.stage_list.add(self._make_stage_row(stage_index, stages[stage_index]))
+
+    self.stage_list.show_all()
+    self._update_overall_progress()
+
+    # Preserve selection only when the selected stage is currently visible.
+    if keep_selection and prev_index is not None:
+        row = self._dw_find_stage_row_clean(prev_index)
+
+        if row is not None:
+            self.stage_list.select_row(row)
+            return
+
+    self._dw_set_no_stage_selected_clean()
+
+
+def _dw_toggle_branch_clean(self, branch):
+    collapsed = self._dw_collapsed_set_clean()
+
+    if branch in collapsed:
+        collapsed.remove(branch)
+    else:
+        collapsed.add(branch)
+
+    self._refresh_stage_list(keep_selection=False)
+
+
+def _dw_branch_summary_clean(self, branch):
+    stages = self.project_data.get("stages", [])
+    lines = [f"# Branch: {branch}", ""]
+
+    indexes = [
+        i for i, stage in enumerate(stages)
+        if self._dw_branch_key_clean(stage) == branch
+    ]
+
+    if not indexes:
+        return f"# Branch: {branch}\n\nNo issues yet.\n"
+
+    total_done = 0
+    total_tasks = 0
+
+    for index in indexes:
+        stage = stages[index]
+        done, total = checklists.progress_for_stage(stage)
+        total_done += done
+        total_tasks += total
+
+    lines.append(f"Progress: {total_done} / {total_tasks} tasks complete")
+    lines.append("")
+
+    for index in indexes:
+        stage = stages[index]
+        done, total = checklists.progress_for_stage(stage)
+        title = stage.get("issue") or stage.get("title") or "Untitled"
+
+        lines.append(f"## Issue: {title}")
+        lines.append(f"Status: {_dw_status_label_clean(done, total)}")
+        lines.append(f"Progress: {done} / {total} tasks complete")
+        lines.append("")
+
+        for item in stage.get("items", []):
+            if item.get("done"):
+                continue
+
+            lines.append(f"- {item.get('text', '')}")
+            lines.append("Done: no")
+
+            desc = str(item.get("description", "") or "").strip()
+            if desc:
+                lines.append(f"Descript: {desc}")
+
+            lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _dw_copy_branch_summary_clean(self, branch):
+    text = self._dw_branch_summary_clean(branch)
+
+    try:
+        self._dw_copy_to_clipboard(text, "Branch summary copied.")
+    except Exception:
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(text, -1)
+        self._show_info("Branch summary copied.")
+
+
+def _dw_expand_all_branches_clean(self):
+    self._dw_collapsed_branches = set()
+    self._refresh_stage_list(keep_selection=False)
+
+
+def _dw_collapse_all_branches_clean(self):
+    self._dw_collapsed_branches = set(self._dw_all_branch_keys_clean())
+    self._refresh_stage_list(keep_selection=False)
+
+
+def _dw_branch_context_menu_clean(self, branch, event):
+    menu = Gtk.Menu()
+
+    def add(label, cb):
+        item = Gtk.MenuItem(label=label)
+        item.connect("activate", cb)
+        menu.append(item)
+
+    is_closed = branch in self._dw_collapsed_set_clean()
+
+    add("📂 Open branch" if is_closed else "📁 Close branch", lambda _: self._dw_toggle_branch_clean(branch))
+    add("📋 Copy active branch summary", lambda _: self._dw_copy_branch_summary_clean(branch))
+    menu.append(Gtk.SeparatorMenuItem())
+    add("📂 Open all branches", lambda _: self._dw_expand_all_branches_clean())
+    add("📁 Close all branches", lambda _: self._dw_collapse_all_branches_clean())
+
+    menu.show_all()
+    menu.popup_at_pointer(event)
+
+
+def _dw_on_stage_list_button_press_clean(self, widget, event):
+    row = self.stage_list.get_row_at_y(int(event.y))
+
+    if row is not None and getattr(row, "is_branch_header", False):
+        branch = getattr(row, "branch_key", "No branch")
+
+        if event.button == 1:
+            self._dw_toggle_branch_clean(branch)
+            return True
+
+        if event.button == 3:
+            self._dw_branch_context_menu_clean(branch, event)
+            return True
+
+    return ChecklistWindow._dw_clean_branch_base_button_press(self, widget, event)
+
+
+def _dw_on_stage_selected_clean(self, listbox, row):
+    # Branch rows are now non-selectable and handled by button-press.
+    # This avoids clicking a branch accidentally clearing the main detail pane.
+    if row is not None and getattr(row, "is_branch_header", False):
+        return
+
+    return ChecklistWindow._dw_clean_branch_base_stage_selected(self, listbox, row)
+
+
+if not getattr(ChecklistWindow, "_dw_clean_branch_click_patch_applied", False):
+    ChecklistWindow._dw_clean_branch_base_button_press = ChecklistWindow._on_stage_list_button_press
+    ChecklistWindow._dw_clean_branch_base_stage_selected = ChecklistWindow._on_stage_selected
+
+    ChecklistWindow._dw_all_branch_keys_clean = _dw_all_branch_keys_clean
+    ChecklistWindow._dw_collapsed_set_clean = _dw_collapsed_set_clean
+    ChecklistWindow._dw_collapsed_set = _dw_collapsed_set_clean
+    ChecklistWindow._dw_branch_key_clean = _dw_branch_key_clean
+    ChecklistWindow._dw_branch_groups_clean = _dw_branch_groups_clean
+
+    ChecklistWindow._dw_make_branch_header_row_clean = _dw_make_branch_header_row_clean
+    ChecklistWindow._dw_make_branch_header_row = _dw_make_branch_header_row_clean
+    ChecklistWindow._make_stage_row = _dw_make_stage_row_clean_icons
+
+    ChecklistWindow._dw_find_stage_row_clean = _dw_find_stage_row_clean
+    ChecklistWindow._dw_set_no_stage_selected_clean = _dw_set_no_stage_selected_clean
+    ChecklistWindow._refresh_stage_list = _dw_refresh_stage_list_clean
+
+    ChecklistWindow._dw_toggle_branch_clean = _dw_toggle_branch_clean
+    ChecklistWindow._dw_toggle_branch = _dw_toggle_branch_clean
+    ChecklistWindow._dw_branch_summary_clean = _dw_branch_summary_clean
+    ChecklistWindow._dw_copy_branch_summary_clean = _dw_copy_branch_summary_clean
+    ChecklistWindow._dw_expand_all_branches_clean = _dw_expand_all_branches_clean
+    ChecklistWindow._dw_collapse_all_branches_clean = _dw_collapse_all_branches_clean
+    ChecklistWindow._dw_branch_context_menu_clean = _dw_branch_context_menu_clean
+
+    ChecklistWindow._on_stage_list_button_press = _dw_on_stage_list_button_press_clean
+    ChecklistWindow._on_stage_selected = _dw_on_stage_selected_clean
+
+    ChecklistWindow._dw_clean_branch_click_patch_applied = True
+
