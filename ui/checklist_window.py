@@ -3019,3 +3019,455 @@ if not getattr(ChecklistWindow, "_dw_branch_section_sidebar_patch_applied", Fals
 
     ChecklistWindow._dw_branch_section_sidebar_patch_applied = True
 
+
+
+# ── DevWise branch collapsed click-row UX patch ─────────────────────────────
+# Changes:
+# - Branch groups start collapsed by default.
+# - New branches imported later also start collapsed.
+# - No tiny arrow button.
+# - Click anywhere on a branch row to open/close it.
+# - Right-click a branch for branch actions.
+# - If a remembered stage exists, it is restored only after opening that branch.
+
+def _dw_all_branch_keys_v2(self):
+    branches = []
+
+    for stage in self.project_data.get("stages", []):
+        try:
+            branch = self._dw_branch_key_for_stage(stage)
+        except Exception:
+            branch = str(stage.get("branch", "") or "").strip() or "No branch"
+
+        if branch not in branches:
+            branches.append(branch)
+
+    return branches
+
+
+def _dw_collapsed_set_click_anywhere(self):
+    branches = set(self._dw_all_branch_keys_v2())
+
+    if not hasattr(self, "_dw_collapsed_branches"):
+        self._dw_collapsed_branches = set(branches)
+        self._dw_seen_branches = set(branches)
+        return self._dw_collapsed_branches
+
+    if not hasattr(self, "_dw_seen_branches"):
+        self._dw_seen_branches = set()
+
+    # Any newly imported branch should start closed by default.
+    new_branches = branches - self._dw_seen_branches
+    self._dw_collapsed_branches.update(new_branches)
+    self._dw_seen_branches.update(new_branches)
+
+    # Drop collapsed keys for deleted branches.
+    self._dw_collapsed_branches.intersection_update(branches)
+
+    return self._dw_collapsed_branches
+
+
+def _dw_branch_stage_indexes_v2(self, branch):
+    indexes = []
+
+    for index, stage in enumerate(self.project_data.get("stages", [])):
+        try:
+            key = self._dw_branch_key_for_stage(stage)
+        except Exception:
+            key = str(stage.get("branch", "") or "").strip() or "No branch"
+
+        if key == branch:
+            indexes.append(index)
+
+    return indexes
+
+
+def _dw_branch_summary_text_v2(self, branch):
+    indexes = self._dw_branch_stage_indexes_v2(branch)
+    stages = self.project_data.get("stages", [])
+
+    done_total = 0
+    task_total = 0
+    incomplete_tasks = 0
+
+    lines = [f"# Branch: {branch}", ""]
+
+    if not indexes:
+        lines.append("No issues/stages in this branch yet.")
+        return "\n".join(lines)
+
+    for index in indexes:
+        stage = stages[index]
+        done, total = checklists.progress_for_stage(stage)
+        done_total += done
+        task_total += total
+        incomplete_tasks += max(0, total - done)
+
+        issue = (
+            stage.get("issue")
+            or stage.get("title")
+            or "Untitled"
+        )
+
+        if total <= 0:
+            status = "EMPTY"
+        elif done <= 0:
+            status = "NOT STARTED"
+        elif done >= total:
+            status = "COMPLETE"
+        else:
+            status = "IN PROGRESS"
+
+        lines.append(f"## {issue}")
+        lines.append(f"Status: {status}")
+        lines.append(f"Progress: {done} / {total}")
+        lines.append("")
+
+        for item in stage.get("items", []):
+            if item.get("done"):
+                continue
+
+            lines.append(f"- {item.get('text', '')}")
+            desc = str(item.get("description", "") or "").strip()
+            if desc:
+                lines.append(f"  Descript: {desc}")
+            lines.append("")
+
+    lines.insert(2, f"Overall: {done_total} / {task_total} complete")
+    lines.insert(3, f"Incomplete tasks: {incomplete_tasks}")
+    lines.insert(4, "")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _dw_make_branch_header_row_click_anywhere(self, group):
+    row = Gtk.ListBoxRow()
+    row.set_selectable(True)
+    row.is_branch_header = True
+    row.branch_key = group["branch"]
+
+    collapsed = group["branch"] in self._dw_collapsed_set()
+
+    icon = "📁" if collapsed else "📂"
+
+    if group["total"] <= 0:
+        status = "EMPTY"
+    elif group["done"] <= 0:
+        status = "NOT STARTED"
+    elif group["done"] >= group["total"]:
+        status = "COMPLETE"
+    else:
+        status = "IN PROGRESS"
+
+    active = max(0, group["total"] - group["done"])
+
+    box = Gtk.Box(spacing=8)
+    box.set_border_width(8)
+
+    title = Gtk.Label()
+    title.set_markup(f"<b>{icon} {group['branch']}</b>")
+    title.set_halign(Gtk.Align.START)
+    title.set_ellipsize(Pango.EllipsizeMode.END)
+    box.pack_start(title, True, True, 0)
+
+    summary = Gtk.Label(label=f"{len(group['indexes'])} issue(s) • {active} active • {group['done']}/{group['total']} • {status}")
+    summary.set_halign(Gtk.Align.END)
+    summary.get_style_context().add_class("stage-progress")
+    box.pack_end(summary, False, False, 0)
+
+    row.set_tooltip_text(
+        "Click anywhere on this branch row to open/close it.\n"
+        "Right-click for branch actions."
+    )
+
+    row.add(box)
+    return row
+
+
+def _dw_find_stage_row_v2(self, stage_index):
+    for row in self.stage_list.get_children():
+        if getattr(row, "stage_index", None) == stage_index:
+            return row
+    return None
+
+
+def _dw_select_stage_and_item_v2(self, stage_index, item_index=None):
+    stages = self.project_data.get("stages", [])
+
+    if not (0 <= stage_index < len(stages)):
+        return False
+
+    row = self._dw_find_stage_row(stage_index)
+    if row is None:
+        return False
+
+    try:
+        self.stage_list.unselect_all()
+    except Exception:
+        pass
+
+    self.stage_list.select_row(row)
+
+    self.selected_stage_index = stage_index
+    self.selected_item_index = None
+    self._set_right_enabled(True)
+    self._refresh_items_list()
+    self._refresh_stage_header()
+    self._load_notes()
+
+    if item_index is not None:
+        items = stages[stage_index].get("items", [])
+        if items:
+            item_index = max(0, min(int(item_index), len(items) - 1))
+            item_row = self.items_list.get_row_at_index(item_index)
+
+            if item_row is not None:
+                try:
+                    self.items_list.unselect_all()
+                except Exception:
+                    pass
+
+                self.items_list.select_row(item_row)
+                self.selected_item_index = item_index
+                self._load_task_description(item_index)
+
+    return True
+
+
+def _dw_refresh_stage_list_closed_default(self, keep_selection=True):
+    prev_index = self.selected_stage_index
+    stages = self.project_data.get("stages", [])
+
+    for child in self.stage_list.get_children():
+        self.stage_list.remove(child)
+
+    if not stages:
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        lbl = Gtk.Label(label="No stages yet.\nUse 'Add Stage' or import a roadmap.")
+        lbl.set_justify(Gtk.Justification.CENTER)
+        lbl.set_margin_top(16)
+        row.add(lbl)
+        self.stage_list.add(row)
+    else:
+        for group in self._dw_branch_groups():
+            self.stage_list.add(self._dw_make_branch_header_row(group))
+
+            if group["branch"] in self._dw_collapsed_set():
+                continue
+
+            for stage_index in group["indexes"]:
+                row = self._make_stage_row(stage_index, stages[stage_index])
+
+                try:
+                    child = row.get_child()
+                    if child is not None:
+                        child.set_margin_start(18)
+                except Exception:
+                    pass
+
+                self.stage_list.add(row)
+
+    self.stage_list.show_all()
+    self._update_overall_progress()
+
+    # Preserve visible stage selection only. Do not auto-open branches anymore.
+    if keep_selection and prev_index is not None:
+        row = self._dw_find_stage_row(prev_index)
+
+        if row is not None:
+            self.stage_list.select_row(row)
+            return
+
+    self.selected_stage_index = None
+    self.selected_item_index = None
+    self._set_right_enabled(False)
+
+
+def _dw_store_pending_resume_closed(self):
+    try:
+        key = self._mc_resume_key()
+        saved = _mc_resume_store().get(key)
+    except Exception:
+        saved = None
+
+    if saved:
+        self._dw_pending_resume = saved
+
+    # Keep branches closed on initial open.
+    return False
+
+
+def _dw_try_restore_pending_for_branch(self, branch):
+    saved = getattr(self, "_dw_pending_resume", None)
+
+    if not saved:
+        return False
+
+    try:
+        stage_index = int(saved.get("stage", 0))
+    except Exception:
+        return False
+
+    stages = self.project_data.get("stages", [])
+
+    if not (0 <= stage_index < len(stages)):
+        return False
+
+    try:
+        stage_branch = self._dw_branch_key_for_stage(stages[stage_index])
+    except Exception:
+        stage_branch = str(stages[stage_index].get("branch", "") or "").strip() or "No branch"
+
+    if stage_branch != branch:
+        return False
+
+    raw_item = saved.get("item", None)
+
+    try:
+        item_index = int(raw_item) if raw_item is not None else None
+    except Exception:
+        item_index = None
+
+    restored = self._dw_select_stage_and_item_v2(stage_index, item_index)
+
+    if restored:
+        self._dw_pending_resume = None
+
+    return restored
+
+
+def _dw_toggle_branch_click_anywhere(self, branch):
+    collapsed = self._dw_collapsed_set()
+    opening = branch in collapsed
+
+    if opening:
+        collapsed.remove(branch)
+    else:
+        collapsed.add(branch)
+
+    self._refresh_stage_list(keep_selection=False)
+
+    if opening:
+        # Nice extra: if this branch contained the last selected issue, restore it now.
+        if not self._dw_try_restore_pending_for_branch(branch):
+            # Otherwise just reveal issues without forcing a selection.
+            self.selected_stage_index = None
+            self.selected_item_index = None
+            self._set_right_enabled(False)
+    else:
+        self.selected_stage_index = None
+        self.selected_item_index = None
+        self._set_right_enabled(False)
+
+
+def _dw_on_stage_selected_click_branch(self, listbox, row):
+    if row is not None and getattr(row, "is_branch_header", False):
+        branch = getattr(row, "branch_key", "No branch")
+        self._dw_toggle_branch(branch)
+
+        try:
+            listbox.unselect_row(row)
+        except Exception:
+            pass
+
+        return
+
+    return ChecklistWindow._dw_branch_click_base_on_stage_selected(self, listbox, row)
+
+
+def _dw_copy_to_clipboard_quiet_v2(self, text, message="Copied."):
+    try:
+        self._dw_copy_to_clipboard(text, message)
+        return
+    except Exception:
+        pass
+
+    try:
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(text or "", -1)
+        self._show_info(message)
+    except Exception:
+        pass
+
+
+def _dw_branch_context_menu_v2(self, branch, event):
+    menu = Gtk.Menu()
+
+    def add(label, cb):
+        item = Gtk.MenuItem(label=label)
+        item.connect("activate", cb)
+        menu.append(item)
+
+    collapsed = branch in self._dw_collapsed_set()
+
+    add("📂 Open branch" if collapsed else "📁 Close branch",
+        lambda _: self._dw_toggle_branch(branch))
+
+    add("📋 Copy branch summary",
+        lambda _: self._dw_copy_to_clipboard_quiet_v2(
+            self._dw_branch_summary_text_v2(branch),
+            "Branch summary copied."
+        ))
+
+    menu.append(Gtk.SeparatorMenuItem())
+
+    add("📂 Open all branches", lambda _: self._dw_expand_all_branches())
+    add("📁 Close all branches", lambda _: self._dw_collapse_all_branches())
+
+    menu.show_all()
+    menu.popup_at_pointer(event)
+
+
+def _dw_expand_all_branches(self):
+    self._dw_collapsed_set().clear()
+    self._refresh_stage_list(keep_selection=False)
+
+
+def _dw_collapse_all_branches(self):
+    self._dw_collapsed_branches = set(self._dw_all_branch_keys_v2())
+    self.selected_stage_index = None
+    self.selected_item_index = None
+    self._refresh_stage_list(keep_selection=False)
+
+
+def _dw_on_stage_list_button_press_branch_menu(self, widget, event):
+    row = self.stage_list.get_row_at_y(int(event.y))
+
+    if event.button == 3 and row is not None and getattr(row, "is_branch_header", False):
+        branch = getattr(row, "branch_key", "No branch")
+        self._dw_branch_context_menu_v2(branch, event)
+        return True
+
+    return ChecklistWindow._dw_branch_click_base_stage_button_press(self, widget, event)
+
+
+if not getattr(ChecklistWindow, "_dw_branch_click_anywhere_patch_applied", False):
+    ChecklistWindow._dw_branch_click_base_on_stage_selected = ChecklistWindow._on_stage_selected
+    ChecklistWindow._dw_branch_click_base_stage_button_press = ChecklistWindow._on_stage_list_button_press
+
+    ChecklistWindow._dw_all_branch_keys_v2 = _dw_all_branch_keys_v2
+    ChecklistWindow._dw_collapsed_set = _dw_collapsed_set_click_anywhere
+    ChecklistWindow._dw_branch_stage_indexes_v2 = _dw_branch_stage_indexes_v2
+    ChecklistWindow._dw_branch_summary_text_v2 = _dw_branch_summary_text_v2
+    ChecklistWindow._dw_make_branch_header_row = _dw_make_branch_header_row_click_anywhere
+    ChecklistWindow._dw_find_stage_row = _dw_find_stage_row_v2
+    ChecklistWindow._dw_select_stage_and_item_v2 = _dw_select_stage_and_item_v2
+
+    ChecklistWindow._refresh_stage_list = _dw_refresh_stage_list_closed_default
+    ChecklistWindow._on_stage_selected = _dw_on_stage_selected_click_branch
+    ChecklistWindow._on_stage_list_button_press = _dw_on_stage_list_button_press_branch_menu
+
+    ChecklistWindow._dw_toggle_branch = _dw_toggle_branch_click_anywhere
+    ChecklistWindow._dw_store_pending_resume_closed = _dw_store_pending_resume_closed
+    ChecklistWindow._dw_try_restore_pending_for_branch = _dw_try_restore_pending_for_branch
+    ChecklistWindow._dw_copy_to_clipboard_quiet_v2 = _dw_copy_to_clipboard_quiet_v2
+    ChecklistWindow._dw_branch_context_menu_v2 = _dw_branch_context_menu_v2
+    ChecklistWindow._dw_expand_all_branches = _dw_expand_all_branches
+    ChecklistWindow._dw_collapse_all_branches = _dw_collapse_all_branches
+
+    # Override resume so initial checklist opens with branches closed.
+    if hasattr(ChecklistWindow, "_mc_restore_resume"):
+        ChecklistWindow._mc_restore_resume = _dw_store_pending_resume_closed
+
+    ChecklistWindow._dw_branch_click_anywhere_patch_applied = True
+
