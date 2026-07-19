@@ -2022,3 +2022,191 @@ if not getattr(ChecklistWindow, "_dw_branch_issue_patch_applied", False):
 
     ChecklistWindow._dw_branch_issue_patch_applied = True
 
+
+# ── DevWise checklist export/update prompt patch ────────────────────────────
+def _dw_current_checklist_markdown(self):
+    return checklists.export_markdown(
+        self.project_path,
+        os.path.basename(os.path.abspath(self.project_path)),
+    )
+
+
+def _dw_update_checklist_prompt(self):
+    current = self._dw_current_checklist_markdown()
+
+    return (
+        "Update this DevWise checklist.\n\n"
+        "IMPORTANT OUTPUT RULE:\n"
+        "Return only one copyable markdown code block. No explanation outside it.\n\n"
+        "Goal:\n"
+        "- Keep useful existing branches, issues, stages, tasks and descriptions.\n"
+        "- Improve wording where helpful.\n"
+        "- Add missing branches/issues/tasks if needed.\n"
+        "- Do not delete existing work unless it is clearly duplicated or I explicitly ask.\n"
+        "- Use Branch → Issue → Task → Descript format.\n"
+        "- Do not use checkbox syntax like [ ] or [x].\n"
+        "- Do not use tables.\n\n"
+        "Format to return:\n\n"
+        "# Branch: feat/example-branch\n"
+        "Notes: Optional branch/workstream context.\n\n"
+        "## Issue: Short issue title\n"
+        "- Task name\n"
+        "Descript: Useful detail for the task.\n\n"
+        "Current checklist:\n\n"
+        "```markdown\n"
+        f"{current.rstrip()}\n"
+        "```\n"
+    )
+
+
+def _dw_copy_to_clipboard(self, text, message="Copied."):
+    Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(text or "", -1)
+    try:
+        self._show_info(message)
+    except Exception:
+        pass
+
+
+def _dw_text_page(self, text, editable=False):
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+
+    view = Gtk.TextView()
+    view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+    view.set_monospace(True)
+    view.set_editable(editable)
+    view.get_buffer().set_text(text or "")
+
+    scroll.add(view)
+    return scroll, view
+
+
+def _dw_save_markdown_file(self, markdown_text):
+    dlg = Gtk.FileChooserDialog(
+        title="Save Current Checklist",
+        transient_for=self,
+        action=Gtk.FileChooserAction.SAVE,
+        buttons=(
+            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_SAVE, Gtk.ResponseType.OK,
+        ),
+    )
+    dlg.set_do_overwrite_confirmation(True)
+
+    default_dir = os.path.expanduser("~/Projects/Code Reviews")
+    os.makedirs(default_dir, exist_ok=True)
+    dlg.set_current_folder(default_dir)
+    dlg.set_current_name(f"{os.path.basename(self.project_path)}_current_checklist.md")
+
+    if dlg.run() == Gtk.ResponseType.OK:
+        out_path = dlg.get_filename()
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(markdown_text)
+            activity.log_event(self.project_path, "checklist_exported", f"Exported checklist to {out_path}")
+            self._show_info(f"Checklist exported to:\n{out_path}")
+        except Exception as e:
+            self._show_info(f"Failed to export:\n{e}", title="Error")
+
+    dlg.destroy()
+
+
+def _dw_export_checklist_v2(self, _=None):
+    current = self._dw_current_checklist_markdown()
+    update_prompt = self._dw_update_checklist_prompt()
+
+    dlg = Gtk.Dialog(title="Export / Update Checklist", transient_for=self, flags=0)
+    dlg.add_buttons(Gtk.STOCK_CLOSE, Gtk.ResponseType.CLOSE)
+    dlg.set_default_size(760, 620)
+
+    box = dlg.get_content_area()
+    box.set_border_width(10)
+    box.set_spacing(8)
+
+    hint = Gtk.Label()
+    hint.set_markup(
+        "<b>Current Checklist</b> = export/share your current roadmap.\n"
+        "<b>Update Prompt</b> = paste into ChatGPT/Claude to improve or add to it without deleting useful existing work."
+    )
+    hint.set_halign(Gtk.Align.START)
+    hint.set_line_wrap(True)
+    box.pack_start(hint, False, False, 0)
+
+    buttons = Gtk.Box(spacing=6)
+
+    copy_current = Gtk.Button(label="📋 Copy Current Checklist")
+    copy_current.connect("clicked", lambda _: self._dw_copy_to_clipboard(current, "Current checklist copied."))
+
+    copy_prompt = Gtk.Button(label="🔁 Copy Update Prompt")
+    copy_prompt.connect("clicked", lambda _: self._dw_copy_to_clipboard(update_prompt, "Checklist update prompt copied."))
+
+    save_btn = Gtk.Button(label="💾 Save Current Checklist")
+    save_btn.connect("clicked", lambda _: self._dw_save_markdown_file(current))
+
+    buttons.pack_start(copy_current, False, False, 0)
+    buttons.pack_start(copy_prompt, False, False, 0)
+    buttons.pack_start(save_btn, False, False, 0)
+    box.pack_start(buttons, False, False, 0)
+
+    notebook = Gtk.Notebook()
+
+    current_page, _current_view = self._dw_text_page(current, editable=False)
+    prompt_page, _prompt_view = self._dw_text_page(update_prompt, editable=False)
+
+    notebook.append_page(current_page, Gtk.Label(label="Current Checklist"))
+    notebook.append_page(prompt_page, Gtk.Label(label="Update Prompt"))
+
+    box.pack_start(notebook, True, True, 0)
+
+    dlg.show_all()
+    dlg.run()
+    dlg.destroy()
+
+
+def _dw_markdown_import_prompt_v2(self):
+    project_name = os.path.basename(self.project_path) or "{project}"
+
+    return f"""Create or update a {project_name} DevWise checklist.
+
+IMPORTANT OUTPUT RULE:
+Return only one copyable markdown code block. No explanation outside it.
+
+Use this structure:
+
+# Branch: feat/example-branch
+Notes: Optional branch/workstream context.
+
+## Issue: Short issue title
+- First task name
+Descript: Useful detail for this task.
+
+- Second task name
+Descript: Useful detail for this task.
+
+Rules:
+- Use Branch for the Git branch/workstream.
+- Use Issue for grouped work.
+- Use normal bullet points for tasks.
+- Use Descript: directly under a task for task description.
+- Do not use checkbox syntax like [ ] or [x].
+- If updating an existing checklist, keep useful existing work and add/improve rather than deleting.
+- Do not use tables.
+"""
+
+
+def _dw_copy_markdown_import_prompt_v2(self, _=None):
+    self._dw_copy_to_clipboard(
+        self._markdown_import_prompt(),
+        "Markdown checklist/update format copied to clipboard.",
+    )
+
+
+ChecklistWindow._dw_current_checklist_markdown = _dw_current_checklist_markdown
+ChecklistWindow._dw_update_checklist_prompt = _dw_update_checklist_prompt
+ChecklistWindow._dw_copy_to_clipboard = _dw_copy_to_clipboard
+ChecklistWindow._dw_text_page = _dw_text_page
+ChecklistWindow._dw_save_markdown_file = _dw_save_markdown_file
+ChecklistWindow._export_checklist = _dw_export_checklist_v2
+ChecklistWindow._markdown_import_prompt = _dw_markdown_import_prompt_v2
+ChecklistWindow._copy_markdown_import_prompt = _dw_copy_markdown_import_prompt_v2
+

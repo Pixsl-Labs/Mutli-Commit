@@ -23,9 +23,7 @@ from ui.handoff_generator import HandoffGeneratorWindow
 
 from core import command_safety
 
-from ui.focus_window import FocusWindow
 
-from ui.project_templates_window import ProjectTemplatesWindow
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "icon.png")
 
@@ -695,4 +693,62 @@ if not getattr(MainWindow, "_dw_workflow_menu_patch_applied", False):
     MainWindow._dw_open_focus_mode = _dw_open_focus_mode
     MainWindow._dw_open_project_templates = _dw_open_project_templates
     MainWindow._dw_workflow_menu_patch_applied = True
+
+
+# ── DevWise startup-safe workflow lazy patch ────────────────────────────────
+# Keep the main app bootable even if an optional workflow window has an issue.
+
+def _dw_safe_status(self, message):
+    try:
+        self.statusbar.push(0, str(message))
+    except Exception:
+        pass
+
+
+def _dw_safe_error_dialog(self, title, message):
+    try:
+        dlg = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK,
+            text=title,
+        )
+        dlg.format_secondary_text(str(message))
+        dlg.run()
+        dlg.destroy()
+    except Exception:
+        self._dw_safe_status(f"{title}: {message}")
+
+
+def _dw_current_project_path_safe(self):
+    try:
+        return self.commit_panel.project_path
+    except Exception:
+        return None
+
+
+def _dw_open_focus_mode_lazy(self, _=None):
+    try:
+        from ui.focus_window import FocusWindow
+        win = FocusWindow(self, self._dw_current_project_path())
+        win.present()
+    except Exception as e:
+        self._dw_safe_error_dialog("Focus Mode failed to open", e)
+
+
+def _dw_open_project_templates_lazy(self, _=None):
+    try:
+        from ui.project_templates_window import ProjectTemplatesWindow
+        win = ProjectTemplatesWindow(self, self._dw_current_project_path())
+        win.present()
+    except Exception as e:
+        self._dw_safe_error_dialog("Project Templates failed to open", e)
+
+
+MainWindow._dw_safe_status = _dw_safe_status
+MainWindow._dw_safe_error_dialog = _dw_safe_error_dialog
+MainWindow._dw_current_project_path = _dw_current_project_path_safe
+MainWindow._dw_open_focus_mode = _dw_open_focus_mode_lazy
+MainWindow._dw_open_project_templates = _dw_open_project_templates_lazy
 
