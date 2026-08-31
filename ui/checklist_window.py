@@ -4359,3 +4359,296 @@ if not getattr(ChecklistWindow, "_dw_quarter_screen_fit_patch_applied", False):
     ChecklistWindow.__init__ = _dwq_init
     ChecklistWindow._dw_quarter_screen_fit_patch_applied = True
 
+
+
+# ── DevWise GitHub issue clipboard handoff patch ────────────────────────────
+# Adds GitHub-ready title/body copy buttons to the Create Local Issue flow.
+# Keeps local DevWise issue creation, but makes GitHub copy/paste fast.
+
+def _dwgh_clipboard(self, text, message="Copied."):
+    try:
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(text or "", -1)
+    except Exception:
+        pass
+
+    try:
+        self._show_info(message)
+    except Exception:
+        pass
+
+
+def _dwgh_buffer_text(buf):
+    try:
+        start, end = buf.get_bounds()
+        return buf.get_text(start, end, False)
+    except Exception:
+        return ""
+
+
+def _dwgh_task_lines(tasks):
+    lines = []
+
+    for task in tasks or []:
+        title = str(task.get("text", "") or "").strip()
+        desc = str(task.get("description", "") or "").strip()
+        done = bool(task.get("done"))
+
+        if not title:
+            continue
+
+        box = "x" if done else " "
+        lines.append(f"- [{box}] {title}")
+
+        if desc:
+            for line in desc.splitlines():
+                line = line.strip()
+                if line:
+                    lines.append(f"  - {line}")
+
+    return lines
+
+
+def _dwgh_build_body(self, title, branch, stage, tasks):
+    stage_title = str(stage.get("title", "") or "").strip()
+    issue_title = str(stage.get("issue", "") or "").strip()
+    notes = str(stage.get("notes", "") or "").strip()
+
+    lines = [
+        "## Summary",
+        "",
+        title.strip() or stage_title or issue_title or "New issue",
+        "",
+        "## Branch",
+        "",
+        f"`{branch or 'main'}`",
+        "",
+    ]
+
+    if stage_title and stage_title != title:
+        lines.extend([
+            "## Source checklist stage",
+            "",
+            stage_title,
+            "",
+        ])
+
+    if notes:
+        lines.extend([
+            "## Notes",
+            "",
+            notes,
+            "",
+        ])
+
+    lines.extend([
+        "## Tasks",
+        "",
+    ])
+
+    task_lines = _dwgh_task_lines(tasks)
+
+    if task_lines:
+        lines.extend(task_lines)
+    else:
+        lines.append("- [ ] Add implementation details")
+
+    lines.extend([
+        "",
+        "## Testing",
+        "",
+        "- [ ] Run DevWise from terminal",
+        "- [ ] Re-test the related checklist workflow",
+        "- [ ] Confirm the change is committed and pushed",
+    ])
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _dwgh_copy_title(self, entry, *_):
+    title = entry.get_text().strip()
+    self._dwgh_clipboard(title, "GitHub issue title copied.")
+
+
+def _dwgh_copy_body(self, body_buf, *_):
+    body = _dwgh_buffer_text(body_buf).strip()
+    self._dwgh_clipboard(body, "GitHub issue body copied.")
+
+
+def _dwgh_copy_both(self, entry, body_buf, *_):
+    title = entry.get_text().strip()
+    body = _dwgh_buffer_text(body_buf).strip()
+
+    combined = (
+        "GitHub issue title:\n"
+        f"{title}\n\n"
+        "GitHub issue body:\n"
+        f"{body}\n"
+    )
+
+    self._dwgh_clipboard(combined, "GitHub issue title + body copied.")
+
+
+def _dwgh_refresh_body_from_title(self, entry, body_buf, branch, stage, tasks):
+    # Only auto-refresh while the body has not been manually edited.
+    if getattr(self, "_dwgh_body_edited", False):
+        return
+
+    title = entry.get_text().strip()
+    body_buf.set_text(self._dwgh_build_body(title, branch, stage, tasks))
+
+
+def _dwgh_mark_body_edited(self, *_):
+    self._dwgh_body_edited = True
+
+
+def _dw_create_issue_from_selected_github_clipboard(self, _=None):
+    if not dw_issues:
+        self._show_info("Issue helper is unavailable.")
+        return
+
+    stage = self._current_stage()
+
+    if stage is None:
+        self._show_info("Select an issue/stage first.")
+        return
+
+    tasks = self._dw_issue_tasks_from_selection()
+    default_title = stage.get("issue") or stage.get("title", "New issue")
+    default_branch = stage.get("branch") or dw_issues.slugify(default_title)
+
+    self._dwgh_body_edited = False
+
+    dlg = Gtk.Dialog(title="Create Local Issue / GitHub Copy", transient_for=self, flags=0)
+    dlg.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, "Create Issue", Gtk.ResponseType.OK)
+    dlg.set_default_size(720, 520)
+
+    box = dlg.get_content_area()
+    box.set_border_width(12)
+    box.set_spacing(8)
+
+    title_lbl = Gtk.Label()
+    title_lbl.set_markup("<b>GitHub issue title:</b>")
+    title_lbl.set_halign(Gtk.Align.START)
+    box.pack_start(title_lbl, False, False, 0)
+
+    entry = Gtk.Entry()
+    entry.set_text(default_title)
+    entry.set_activates_default(True)
+    box.pack_start(entry, False, False, 0)
+
+    meta = Gtk.Label(label=f"Branch: {default_branch}  •  Tasks captured: {len(tasks)}")
+    meta.set_halign(Gtk.Align.START)
+    try:
+        meta.get_style_context().add_class("stage-progress")
+    except Exception:
+        pass
+    box.pack_start(meta, False, False, 0)
+
+    body_lbl = Gtk.Label()
+    body_lbl.set_markup("<b>GitHub issue body / description:</b>")
+    body_lbl.set_halign(Gtk.Align.START)
+    box.pack_start(body_lbl, False, False, 0)
+
+    body_scroll = Gtk.ScrolledWindow()
+    body_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+    body_scroll.set_min_content_height(260)
+
+    body_view = Gtk.TextView()
+    body_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+    body_view.set_monospace(True)
+    body_buf = body_view.get_buffer()
+    body_buf.set_text(self._dwgh_build_body(default_title, default_branch, stage, tasks))
+    body_buf.connect("changed", self._dwgh_mark_body_edited)
+
+    body_scroll.add(body_view)
+    box.pack_start(body_scroll, True, True, 0)
+
+    copy_row = Gtk.Box(spacing=6)
+
+    copy_title_btn = Gtk.Button(label="📋 Copy Title")
+    copy_title_btn.set_tooltip_text("Copy only the GitHub issue title")
+    copy_title_btn.connect("clicked", self._dwgh_copy_title, entry)
+    copy_row.pack_start(copy_title_btn, False, False, 0)
+
+    copy_body_btn = Gtk.Button(label="📋 Copy Body")
+    copy_body_btn.set_tooltip_text("Copy only the GitHub issue body/description")
+    copy_body_btn.connect("clicked", self._dwgh_copy_body, body_buf)
+    copy_row.pack_start(copy_body_btn, False, False, 0)
+
+    copy_both_btn = Gtk.Button(label="📋 Copy Both")
+    copy_both_btn.set_tooltip_text("Copy title and body together")
+    copy_both_btn.connect("clicked", self._dwgh_copy_both, entry, body_buf)
+    copy_row.pack_start(copy_both_btn, False, False, 0)
+
+    hint = Gtk.Label(label="Paste Title into GitHub title, then Body into GitHub description.")
+    hint.set_halign(Gtk.Align.START)
+    try:
+        hint.get_style_context().add_class("stage-progress")
+    except Exception:
+        pass
+    copy_row.pack_start(hint, True, True, 0)
+
+    box.pack_start(copy_row, False, False, 0)
+
+    entry.connect("changed", self._dwgh_refresh_body_from_title, body_buf, default_branch, stage, tasks)
+
+    dlg.set_default_response(Gtk.ResponseType.OK)
+    dlg.show_all()
+
+    response = dlg.run()
+    title = entry.get_text().strip()
+    body = _dwgh_buffer_text(body_buf).strip()
+    dlg.destroy()
+
+    if response != Gtk.ResponseType.OK or not title:
+        return
+
+    branch = stage.get("branch") or dw_issues.slugify(title)
+    issue = dw_issues.create_issue(
+        self.project_path,
+        title,
+        branch=branch,
+        tasks=tasks,
+        source="checklist",
+    )
+
+    self.project_data["active_issue_id"] = issue.get("id")
+    stage["issue_id"] = issue.get("id")
+    stage["issue"] = issue.get("title")
+    stage["branch"] = issue.get("branch")
+
+    for item in stage.get("items", []):
+        for task in tasks:
+            if item.get("text") == task.get("text"):
+                item["issue_id"] = issue.get("id")
+
+    self._dw_refresh_issue_combo()
+    self._dw_update_branch_issue_bar()
+    self._refresh_stage_header()
+    self._refresh_stage_list()
+    self._mark_dirty()
+
+    combined = (
+        "GitHub issue title:\n"
+        f"{title}\n\n"
+        "GitHub issue body:\n"
+        f"{body}\n"
+    )
+    self._dwgh_clipboard(
+        combined,
+        "Created local issue and copied GitHub title + body.\n\nPaste into GitHub issue fields.",
+    )
+
+
+if not getattr(ChecklistWindow, "_dw_github_issue_clipboard_patch_applied", False):
+    ChecklistWindow._dwgh_clipboard = _dwgh_clipboard
+    ChecklistWindow._dwgh_build_body = _dwgh_build_body
+    ChecklistWindow._dwgh_copy_title = _dwgh_copy_title
+    ChecklistWindow._dwgh_copy_body = _dwgh_copy_body
+    ChecklistWindow._dwgh_copy_both = _dwgh_copy_both
+    ChecklistWindow._dwgh_refresh_body_from_title = _dwgh_refresh_body_from_title
+    ChecklistWindow._dwgh_mark_body_edited = _dwgh_mark_body_edited
+
+    ChecklistWindow._dw_create_issue_from_selected = _dw_create_issue_from_selected_github_clipboard
+    ChecklistWindow._dw_github_issue_clipboard_patch_applied = True
+
