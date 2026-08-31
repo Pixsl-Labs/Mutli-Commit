@@ -4105,3 +4105,257 @@ if not getattr(ChecklistWindow, "_dw_live_branch_stats_cleanup_patch_applied", F
 
     ChecklistWindow._dw_live_branch_stats_cleanup_patch_applied = True
 
+
+
+# ── DevWise quarter-screen checklist fit patch ──────────────────────────────
+# Goal:
+# - Fit comfortably inside a 1/4 screen tile on 1080p-ish displays.
+# - Avoid giant saved geometry making the checklist reopen too large.
+# - Reduce minimum widget pressure from toolbar/items/notes/sidebar.
+# - Keep this as a small compatibility patch rather than a full UI rewrite.
+
+from gi.repository import Gtk as _DWQGtk, Gdk as _DWQGdk, Pango as _DWQPango, GLib as _DWQGLib
+
+
+def _dwq_workarea():
+    try:
+        display = _DWQGdk.Display.get_default()
+        monitor = display.get_primary_monitor() or display.get_monitor(0)
+        area = monitor.get_workarea()
+        return int(area.width), int(area.height)
+    except Exception:
+        try:
+            screen = _DWQGdk.Screen.get_default()
+            return int(screen.get_width()), int(screen.get_height())
+        except Exception:
+            return 1920, 1080
+
+
+def _dwq_target_size():
+    width, height = _dwq_workarea()
+
+    # Quarter tile target. Leave a little breathing room for Cinnamon panels,
+    # titlebars and gTile borders.
+    target_w = max(620, min(920, int(width * 0.48)))
+    target_h = max(420, min(520, int(height * 0.48)))
+
+    return target_w, target_h
+
+
+def _dwq_clamp(value, low, high):
+    try:
+        value = int(value)
+    except Exception:
+        value = low
+
+    return max(low, min(high, value))
+
+
+def _dwq_walk_widgets(widget):
+    yield widget
+
+    if isinstance(widget, _DWQGtk.Container):
+        try:
+            children = widget.get_children()
+        except Exception:
+            children = []
+
+        for child in children:
+            yield from _dwq_walk_widgets(child)
+
+
+def _dwq_short_button_label(label):
+    replacements = {
+        "📋 Paste / Import Roadmap": "📋 Import",
+        "➕ Add Stage": "➕ Issue",
+        "➕ Add Item": "➕ Task",
+        "📤 Export": "📤 Export",
+        "🗑 Delete All": "🗑 All",
+        "🙈 Hide Main Window": "🙈 Hide",
+        "👁 Show Main Window": "👁 Main",
+        "📌 Always on Top": "📌 Top",
+        "Create Issue From Selected": "Issue",
+        "Create/Switch Branch": "Branch",
+        "🗑 Remove Selected Stage": "🗑 Issue",
+        "🗑 Remove Selected Item": "🗑 Task",
+    }
+
+    return replacements.get(label, label)
+
+
+def _dwq_apply_compact_widget_rules(self):
+    target_w, target_h = _dwq_target_size()
+
+    try:
+        self.set_resizable(True)
+        self.set_default_size(target_w, target_h)
+        self.set_size_request(420, 300)
+    except Exception:
+        pass
+
+    for widget in _dwq_walk_widgets(self):
+        try:
+            widget.set_hexpand(True)
+            widget.set_vexpand(False)
+        except Exception:
+            pass
+
+        if isinstance(widget, _DWQGtk.Button):
+            try:
+                label = widget.get_label()
+                if label:
+                    widget.set_label(_dwq_short_button_label(label))
+            except Exception:
+                pass
+
+            try:
+                widget.set_size_request(1, -1)
+            except Exception:
+                pass
+
+        elif isinstance(widget, _DWQGtk.Label):
+            try:
+                raw = widget.get_text() or ""
+
+                if len(raw) > 18:
+                    widget.set_max_width_chars(24)
+                    widget.set_ellipsize(_DWQPango.EllipsizeMode.MIDDLE)
+                    widget.set_single_line_mode(True)
+
+                widget.set_line_wrap(False)
+            except Exception:
+                pass
+
+        elif isinstance(widget, _DWQGtk.ScrolledWindow):
+            try:
+                widget.set_policy(_DWQGtk.PolicyType.AUTOMATIC, _DWQGtk.PolicyType.AUTOMATIC)
+            except Exception:
+                pass
+
+            try:
+                widget.set_min_content_width(1)
+            except Exception:
+                pass
+
+            try:
+                widget.set_min_content_height(60)
+            except Exception:
+                pass
+
+        elif isinstance(widget, _DWQGtk.Paned):
+            try:
+                if widget.get_orientation() == _DWQGtk.Orientation.HORIZONTAL:
+                    widget.set_position(190)
+            except Exception:
+                pass
+
+        elif isinstance(widget, _DWQGtk.TextView):
+            try:
+                widget.set_size_request(1, 55)
+            except Exception:
+                pass
+
+        elif isinstance(widget, _DWQGtk.ListBox):
+            try:
+                widget.set_size_request(1, 80)
+            except Exception:
+                pass
+
+    # Known checklist widgets.
+    for attr, req in [
+        ("stage_list", (150, 90)),
+        ("items_list", (220, 110)),
+        ("notes_view", (220, 55)),
+    ]:
+        try:
+            getattr(self, attr).set_size_request(*req)
+        except Exception:
+            pass
+
+
+def _dwq_restore_window_geometry(self):
+    target_w, target_h = _dwq_target_size()
+
+    try:
+        geom = settings.get("checklist_window_geometry") or {}
+
+        width = _dwq_clamp(geom.get("width", target_w), 420, target_w)
+        height = _dwq_clamp(geom.get("height", target_h), 300, target_h)
+
+        self.set_default_size(width, height)
+        self.set_size_request(420, 300)
+
+        x = geom.get("x")
+        y = geom.get("y")
+
+        if x is not None and y is not None:
+            try:
+                self.move(int(x), int(y))
+            except Exception:
+                pass
+
+    except Exception:
+        self.set_default_size(target_w, target_h)
+        self.set_size_request(420, 300)
+
+
+def _dwq_save_window_geometry(self):
+    try:
+        x, y = self.get_position()
+        width, height = self.get_size()
+        target_w, target_h = _dwq_target_size()
+
+        settings.set_value("checklist_window_geometry", {
+            "x": int(x),
+            "y": int(y),
+            "width": int(_dwq_clamp(width, 420, target_w)),
+            "height": int(_dwq_clamp(height, 300, target_h)),
+        })
+    except Exception:
+        pass
+
+
+def _dwq_on_toggle_main_window(self, btn):
+    result = ChecklistWindow._dwq_base_toggle_main_window(self, btn)
+
+    try:
+        if btn.get_active():
+            btn.set_label("👁 Main")
+        else:
+            btn.set_label("🙈 Hide")
+    except Exception:
+        pass
+
+    return result
+
+
+def _dwq_init(self, *args, **kwargs):
+    ChecklistWindow._dwq_base_init(self, *args, **kwargs)
+
+    _dwq_apply_compact_widget_rules(self)
+
+    try:
+        w, h = _dwq_target_size()
+        self.resize(w, h)
+    except Exception:
+        pass
+
+    # Re-apply after GTK finishes layout, because some existing patches build
+    # branch/issue rows after initial window creation.
+    _DWQGLib.idle_add(lambda: (_dwq_apply_compact_widget_rules(self), False)[1])
+
+
+if not getattr(ChecklistWindow, "_dw_quarter_screen_fit_patch_applied", False):
+    ChecklistWindow._dwq_base_init = ChecklistWindow.__init__
+    ChecklistWindow._dwq_base_restore_window_geometry = ChecklistWindow._restore_window_geometry
+    ChecklistWindow._dwq_base_save_window_geometry = ChecklistWindow._save_window_geometry
+
+    if hasattr(ChecklistWindow, "_on_toggle_main_window"):
+        ChecklistWindow._dwq_base_toggle_main_window = ChecklistWindow._on_toggle_main_window
+        ChecklistWindow._on_toggle_main_window = _dwq_on_toggle_main_window
+
+    ChecklistWindow._restore_window_geometry = _dwq_restore_window_geometry
+    ChecklistWindow._save_window_geometry = _dwq_save_window_geometry
+    ChecklistWindow.__init__ = _dwq_init
+    ChecklistWindow._dw_quarter_screen_fit_patch_applied = True
+
