@@ -4652,3 +4652,371 @@ if not getattr(ChecklistWindow, "_dw_github_issue_clipboard_patch_applied", Fals
     ChecklistWindow._dw_create_issue_from_selected = _dw_create_issue_from_selected_github_clipboard
     ChecklistWindow._dw_github_issue_clipboard_patch_applied = True
 
+
+
+# ── DevWise standalone GitHub issue handoff window patch ────────────────────
+# Makes the GitHub/local issue handoff a standalone Gtk.Window instead of a
+# transient/modal dialog. This lets the checklist window be hidden/minimised
+# while the issue title/body window stays visible for GitHub copy/paste.
+
+def _dwgh_get_body_text_v2(buf):
+    try:
+        start, end = buf.get_bounds()
+        return buf.get_text(start, end, False)
+    except Exception:
+        return ""
+
+
+def _dwgh_keep_issue_window_ref(self, win):
+    if not hasattr(self, "_dw_issue_handoff_windows"):
+        self._dw_issue_handoff_windows = []
+
+    self._dw_issue_handoff_windows.append(win)
+
+    def _drop_ref(_win):
+        try:
+            self._dw_issue_handoff_windows.remove(_win)
+        except Exception:
+            pass
+
+    win.connect("destroy", _drop_ref)
+
+
+def _dwgh_copy_title_v2(self, entry, status_lbl=None):
+    title = entry.get_text().strip()
+
+    try:
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(title, -1)
+    except Exception:
+        pass
+
+    if status_lbl is not None:
+        status_lbl.set_text("✅ Title copied")
+
+
+def _dwgh_copy_body_v2(self, body_buf, status_lbl=None):
+    body = _dwgh_get_body_text_v2(body_buf).strip()
+
+    try:
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(body, -1)
+    except Exception:
+        pass
+
+    if status_lbl is not None:
+        status_lbl.set_text("✅ Body copied")
+
+
+def _dwgh_copy_both_v2(self, entry, body_buf, status_lbl=None):
+    title = entry.get_text().strip()
+    body = _dwgh_get_body_text_v2(body_buf).strip()
+
+    combined = (
+        "GitHub issue title:\n"
+        f"{title}\n\n"
+        "GitHub issue body:\n"
+        f"{body}\n"
+    )
+
+    try:
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(combined, -1)
+    except Exception:
+        pass
+
+    if status_lbl is not None:
+        status_lbl.set_text("✅ Title + body copied")
+
+
+def _dwgh_create_local_issue_from_window_v2(self, win, entry, body_buf, branch, stage, tasks, status_lbl=None):
+    if not dw_issues:
+        if status_lbl is not None:
+            status_lbl.set_text("❌ Issue helper unavailable")
+        return
+
+    title = entry.get_text().strip()
+    body = _dwgh_get_body_text_v2(body_buf).strip()
+
+    if not title:
+        if status_lbl is not None:
+            status_lbl.set_text("❌ Add an issue title first")
+        return
+
+    issue_branch = stage.get("branch") or branch or dw_issues.slugify(title)
+
+    issue = dw_issues.create_issue(
+        self.project_path,
+        title,
+        branch=issue_branch,
+        tasks=tasks,
+        source="checklist",
+    )
+
+    self.project_data["active_issue_id"] = issue.get("id")
+    stage["issue_id"] = issue.get("id")
+    stage["issue"] = issue.get("title")
+    stage["branch"] = issue.get("branch")
+
+    for item in stage.get("items", []):
+        for task in tasks:
+            if item.get("text") == task.get("text"):
+                item["issue_id"] = issue.get("id")
+
+    try:
+        self._dw_refresh_issue_combo()
+    except Exception:
+        pass
+
+    try:
+        self._dw_update_branch_issue_bar()
+    except Exception:
+        pass
+
+    try:
+        self._refresh_stage_header()
+        self._refresh_stage_list()
+        self._mark_dirty()
+    except Exception:
+        pass
+
+    combined = (
+        "GitHub issue title:\n"
+        f"{title}\n\n"
+        "GitHub issue body:\n"
+        f"{body}\n"
+    )
+
+    try:
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(combined, -1)
+    except Exception:
+        pass
+
+    if status_lbl is not None:
+        status_lbl.set_text("✅ Local issue created + title/body copied")
+
+    try:
+        win.set_title("✅ Issue Handoff — Created")
+    except Exception:
+        pass
+
+
+def _dwgh_hide_checklist_from_issue_window_v2(self, win=None):
+    try:
+        self.hide()
+    except Exception:
+        pass
+
+
+def _dwgh_show_checklist_from_issue_window_v2(self, win=None):
+    try:
+        self.show()
+        self.present()
+    except Exception:
+        pass
+
+
+def _dwgh_open_github_new_issue_v2(self, status_lbl=None):
+    import subprocess
+
+    candidates = []
+
+    try:
+        ok, out = checklists.git_ops.run_custom(self.project_path, "git remote get-url origin")
+        if ok and out:
+            candidates.append(out.strip())
+    except Exception:
+        pass
+
+    try:
+        from core import git_ops
+        ok, out = git_ops.run_custom(self.project_path, "git remote get-url origin")
+        if ok and out:
+            candidates.append(out.strip())
+    except Exception:
+        pass
+
+    url = ""
+
+    for remote in candidates:
+        r = remote.strip()
+
+        if r.startswith("git@github.com:"):
+            repo = r.replace("git@github.com:", "", 1).removesuffix(".git")
+            url = f"https://github.com/{repo}/issues/new"
+            break
+
+        if "github.com" in r:
+            repo = r.replace("https://github.com/", "").replace("http://github.com/", "").removesuffix(".git").strip("/")
+            if repo:
+                url = f"https://github.com/{repo}/issues/new"
+                break
+
+    if not url:
+        url = "https://github.com/issues"
+
+    try:
+        subprocess.Popen(["xdg-open", url])
+        if status_lbl is not None:
+            status_lbl.set_text("🌐 Opened GitHub issues page")
+    except Exception:
+        if status_lbl is not None:
+            status_lbl.set_text("❌ Could not open browser")
+
+
+def _dw_create_issue_from_selected_standalone_handoff(self, _=None):
+    if not dw_issues:
+        self._show_info("Issue helper is unavailable.")
+        return
+
+    stage = self._current_stage()
+
+    if stage is None:
+        self._show_info("Select an issue/stage first.")
+        return
+
+    tasks = self._dw_issue_tasks_from_selection()
+    default_title = stage.get("issue") or stage.get("title", "New issue")
+    default_branch = stage.get("branch") or dw_issues.slugify(default_title)
+
+    win = Gtk.Window(title="GitHub Issue Handoff")
+    win.set_default_size(740, 560)
+    win.set_size_request(460, 330)
+    win.set_resizable(True)
+    win.set_keep_above(True)
+
+    try:
+        win.set_type_hint(Gdk.WindowTypeHint.UTILITY)
+    except Exception:
+        pass
+
+    self._dwgh_keep_issue_window_ref(win)
+
+    root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+    root.set_border_width(12)
+    win.add(root)
+
+    header = Gtk.Box(spacing=8)
+
+    title_lbl = Gtk.Label()
+    title_lbl.set_markup("<b>GitHub Issue Handoff</b>")
+    title_lbl.set_halign(Gtk.Align.START)
+    header.pack_start(title_lbl, True, True, 0)
+
+    hide_checklist_btn = Gtk.Button(label="🙈 Hide Checklist")
+    hide_checklist_btn.set_tooltip_text("Hide the checklist while keeping this issue window open")
+    hide_checklist_btn.connect("clicked", lambda *_: self._dwgh_hide_checklist_from_issue_window_v2(win))
+    header.pack_end(hide_checklist_btn, False, False, 0)
+
+    show_checklist_btn = Gtk.Button(label="👁 Checklist")
+    show_checklist_btn.set_tooltip_text("Show the checklist again")
+    show_checklist_btn.connect("clicked", lambda *_: self._dwgh_show_checklist_from_issue_window_v2(win))
+    header.pack_end(show_checklist_btn, False, False, 0)
+
+    root.pack_start(header, False, False, 0)
+
+    root.pack_start(Gtk.Separator(), False, False, 0)
+
+    title_label = Gtk.Label(label="GitHub issue title:")
+    title_label.set_halign(Gtk.Align.START)
+    root.pack_start(title_label, False, False, 0)
+
+    entry = Gtk.Entry()
+    entry.set_text(default_title)
+    root.pack_start(entry, False, False, 0)
+
+    meta = Gtk.Label(label=f"Branch: {default_branch}  •  Tasks captured: {len(tasks)}")
+    meta.set_halign(Gtk.Align.START)
+    try:
+        meta.get_style_context().add_class("stage-progress")
+    except Exception:
+        pass
+    root.pack_start(meta, False, False, 0)
+
+    body_label = Gtk.Label(label="GitHub issue body / description:")
+    body_label.set_halign(Gtk.Align.START)
+    root.pack_start(body_label, False, False, 0)
+
+    body_scroll = Gtk.ScrolledWindow()
+    body_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+    body_scroll.set_min_content_height(260)
+
+    body_view = Gtk.TextView()
+    body_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+    body_view.set_monospace(True)
+
+    body_buf = body_view.get_buffer()
+    body_buf.set_text(self._dwgh_build_body(default_title, default_branch, stage, tasks))
+
+    body_scroll.add(body_view)
+    root.pack_start(body_scroll, True, True, 0)
+
+    status_lbl = Gtk.Label(label="Ready — copy title/body into GitHub.")
+    status_lbl.set_halign(Gtk.Align.START)
+    try:
+        status_lbl.get_style_context().add_class("stage-progress")
+    except Exception:
+        pass
+
+    btn_row = Gtk.Box(spacing=6)
+
+    copy_title_btn = Gtk.Button(label="📋 Title")
+    copy_title_btn.connect("clicked", lambda *_: self._dwgh_copy_title_v2(entry, status_lbl))
+    btn_row.pack_start(copy_title_btn, False, False, 0)
+
+    copy_body_btn = Gtk.Button(label="📋 Body")
+    copy_body_btn.connect("clicked", lambda *_: self._dwgh_copy_body_v2(body_buf, status_lbl))
+    btn_row.pack_start(copy_body_btn, False, False, 0)
+
+    copy_both_btn = Gtk.Button(label="📋 Both")
+    copy_both_btn.connect("clicked", lambda *_: self._dwgh_copy_both_v2(entry, body_buf, status_lbl))
+    btn_row.pack_start(copy_both_btn, False, False, 0)
+
+    open_github_btn = Gtk.Button(label="🌐 GitHub")
+    open_github_btn.set_tooltip_text("Open the GitHub new issue page for this repo when possible")
+    open_github_btn.connect("clicked", lambda *_: self._dwgh_open_github_new_issue_v2(status_lbl))
+    btn_row.pack_start(open_github_btn, False, False, 0)
+
+    create_btn = Gtk.Button(label="Create Local Issue")
+    create_btn.connect(
+        "clicked",
+        lambda *_: self._dwgh_create_local_issue_from_window_v2(
+            win, entry, body_buf, default_branch, stage, tasks, status_lbl
+        )
+    )
+    btn_row.pack_end(create_btn, False, False, 0)
+
+    close_btn = Gtk.Button(label="Close")
+    close_btn.connect("clicked", lambda *_: win.destroy())
+    btn_row.pack_end(close_btn, False, False, 0)
+
+    root.pack_start(btn_row, False, False, 0)
+    root.pack_start(status_lbl, False, False, 0)
+
+    def _refresh_body_from_title(_entry):
+        try:
+            current_body = _dwgh_get_body_text_v2(body_buf).strip()
+            generated_old = self._dwgh_build_body(default_title, default_branch, stage, tasks).strip()
+
+            # Only auto-refresh if user has not manually changed the body.
+            if current_body == generated_old or not current_body:
+                body_buf.set_text(self._dwgh_build_body(entry.get_text().strip(), default_branch, stage, tasks))
+        except Exception:
+            pass
+
+    entry.connect("changed", _refresh_body_from_title)
+
+    win.show_all()
+    win.present()
+
+
+if not getattr(ChecklistWindow, "_dw_standalone_issue_handoff_patch_applied", False):
+    ChecklistWindow._dwgh_keep_issue_window_ref = _dwgh_keep_issue_window_ref
+    ChecklistWindow._dwgh_copy_title_v2 = _dwgh_copy_title_v2
+    ChecklistWindow._dwgh_copy_body_v2 = _dwgh_copy_body_v2
+    ChecklistWindow._dwgh_copy_both_v2 = _dwgh_copy_both_v2
+    ChecklistWindow._dwgh_create_local_issue_from_window_v2 = _dwgh_create_local_issue_from_window_v2
+    ChecklistWindow._dwgh_hide_checklist_from_issue_window_v2 = _dwgh_hide_checklist_from_issue_window_v2
+    ChecklistWindow._dwgh_show_checklist_from_issue_window_v2 = _dwgh_show_checklist_from_issue_window_v2
+    ChecklistWindow._dwgh_open_github_new_issue_v2 = _dwgh_open_github_new_issue_v2
+
+    ChecklistWindow._dw_create_issue_from_selected = _dw_create_issue_from_selected_standalone_handoff
+    ChecklistWindow._dw_standalone_issue_handoff_patch_applied = True
+
