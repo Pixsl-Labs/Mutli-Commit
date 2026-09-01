@@ -5497,3 +5497,353 @@ if not getattr(ChecklistWindow, "_dw_branch_handoff_window_patch_applied", False
     ChecklistWindow._dw_create_or_switch_issue_branch = _dw_create_or_switch_issue_branch_handoff
     ChecklistWindow._dw_branch_handoff_window_patch_applied = True
 
+
+
+# ── DevWise clean branch issue handoff format patch ─────────────────────────
+# Changes Branch Handoff from raw Git branch output into a GitHub-issue-ready
+# handoff:
+# - chore/placement-engineering-enhancements -> Placement Engineering Enhancements
+# - Copyable issue title is the clean human title
+# - Copyable body is a clean branch summary
+# - Removes repeated Status/Progress noise per issue
+# - Keeps the real Git branch available for Create/Switch Git Branch
+
+def _dwbhs_human_branch_title(branch):
+    import re
+
+    raw = str(branch or "").strip()
+
+    if not raw:
+        return "Branch Summary"
+
+    raw = raw.replace("refs/heads/", "").strip("/")
+
+    parts = [p for p in raw.split("/") if p]
+
+    if len(parts) > 1 and parts[0].lower() in {
+        "feat", "fix", "chore", "docs", "doc", "test", "tests",
+        "refactor", "style", "perf", "build", "ci", "release", "hotfix"
+    }:
+        raw = "/".join(parts[1:])
+
+    raw = re.sub(r"[-_/]+", " ", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+
+    if not raw:
+        return "Branch Summary"
+
+    small_words = {"and", "or", "the", "a", "an", "to", "for", "of", "in", "on", "with"}
+    acronyms = {"api", "cli", "ui", "ux", "gui", "ssh", "http", "https", "json", "csv", "sql", "ip"}
+
+    words = []
+
+    for index, word in enumerate(raw.split()):
+        lower = word.lower()
+
+        if lower in acronyms:
+            words.append(lower.upper())
+        elif index > 0 and lower in small_words:
+            words.append(lower)
+        else:
+            words.append(lower[:1].upper() + lower[1:])
+
+    return " ".join(words)
+
+
+def _dwbhs_stage_note(stage):
+    notes = str(stage.get("notes", "") or "").strip()
+    branch_notes = str(stage.get("branch_notes", "") or "").strip()
+
+    if notes:
+        return notes
+
+    return branch_notes
+
+
+def _dwbhs_build_branch_description(self, branch):
+    stages = self._dwbh_branch_stages(branch) if hasattr(self, "_dwbh_branch_stages") else []
+    title = _dwbhs_human_branch_title(branch)
+
+    lines = [
+        f"# {title}",
+        "",
+    ]
+
+    if not stages:
+        lines.extend([
+            "No checklist issues were found for this branch yet.",
+            "",
+            "## Testing checklist",
+            "",
+            "- [ ] Run the project from terminal",
+            "- [ ] Confirm the branch checklist tasks match the implementation",
+            "- [ ] Commit and push the related changes",
+        ])
+        return "\n".join(lines).rstrip() + "\n"
+
+    for stage in stages:
+        issue_title = (
+            str(stage.get("issue", "") or "").strip()
+            or str(stage.get("title", "") or "").strip()
+            or "Untitled issue"
+        )
+
+        lines.extend([
+            f"## Issue: {issue_title}",
+            "",
+        ])
+
+        note = _dwbhs_stage_note(stage)
+
+        if note:
+            lines.extend([
+                note,
+                "",
+            ])
+
+        items = stage.get("items", []) or []
+
+        if not items:
+            lines.extend([
+                "- [ ] Add implementation task",
+                "",
+            ])
+            continue
+
+        for item in items:
+            task = str(item.get("text", "") or "").strip()
+
+            if not task:
+                continue
+
+            tick = "x" if item.get("done") else " "
+            lines.append(f"- [{tick}] {task}")
+
+            desc = str(item.get("description", "") or "").strip()
+            if desc:
+                for desc_line in desc.splitlines():
+                    desc_line = desc_line.strip()
+                    if desc_line:
+                        lines.append(f"  - {desc_line}")
+
+        lines.append("")
+
+    lines.extend([
+        "## Testing checklist",
+        "",
+        "- [ ] Run the project from terminal",
+        "- [ ] Confirm the branch checklist tasks match the implementation",
+        "- [ ] Commit and push the related changes",
+        "",
+    ])
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _dwbhs_open_window(self, branch):
+    if not branch:
+        self._show_info("Click a checklist branch/folder row first, then press Branch.")
+        return
+
+    issue_title = _dwbhs_human_branch_title(branch)
+
+    win = Gtk.Window(title="Branch Issue Handoff")
+    win.set_default_size(760, 560)
+    win.set_size_request(460, 340)
+    win.set_resizable(True)
+    win.set_keep_above(True)
+
+    try:
+        win.set_type_hint(Gdk.WindowTypeHint.UTILITY)
+    except Exception:
+        pass
+
+    if not hasattr(self, "_dw_branch_handoff_windows"):
+        self._dw_branch_handoff_windows = []
+
+    self._dw_branch_handoff_windows.append(win)
+
+    def _drop_ref(_win):
+        try:
+            self._dw_branch_handoff_windows.remove(_win)
+        except Exception:
+            pass
+
+    win.connect("destroy", _drop_ref)
+
+    root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+    root.set_border_width(12)
+    win.add(root)
+
+    header = Gtk.Box(spacing=8)
+
+    heading = Gtk.Label()
+    heading.set_markup("<b>Branch Issue Handoff</b>")
+    heading.set_halign(Gtk.Align.START)
+    header.pack_start(heading, True, True, 0)
+
+    hide_btn = Gtk.Button(label="🙈 Hide Checklist")
+    hide_btn.set_tooltip_text("Hide the checklist while keeping this handoff window open")
+    hide_btn.connect("clicked", lambda *_: self.hide())
+    header.pack_end(hide_btn, False, False, 0)
+
+    show_btn = Gtk.Button(label="👁 Checklist")
+    show_btn.set_tooltip_text("Show the checklist again")
+    show_btn.connect("clicked", lambda *_: (self.show(), self.present()))
+    header.pack_end(show_btn, False, False, 0)
+
+    root.pack_start(header, False, False, 0)
+    root.pack_start(Gtk.Separator(), False, False, 0)
+
+    title_lbl = Gtk.Label(label="GitHub issue title:")
+    title_lbl.set_halign(Gtk.Align.START)
+    root.pack_start(title_lbl, False, False, 0)
+
+    title_entry = Gtk.Entry()
+    title_entry.set_text(issue_title)
+    title_entry.set_editable(True)
+    title_entry.set_tooltip_text("Copy this into the GitHub issue title.")
+    root.pack_start(title_entry, False, False, 0)
+
+    branch_lbl = Gtk.Label(label="Real Git branch:")
+    branch_lbl.set_halign(Gtk.Align.START)
+    root.pack_start(branch_lbl, False, False, 0)
+
+    branch_entry = Gtk.Entry()
+    branch_entry.set_text(branch)
+    branch_entry.set_editable(True)
+    branch_entry.set_tooltip_text("Copy this if you need the actual Git branch name.")
+    root.pack_start(branch_entry, False, False, 0)
+
+    stages = self._dwbh_branch_stages(branch) if hasattr(self, "_dwbh_branch_stages") else []
+    total_done = 0
+    total_tasks = 0
+
+    for stage in stages:
+        done, total = checklists.progress_for_stage(stage)
+        total_done += done
+        total_tasks += total
+
+    meta = Gtk.Label(label=f"{len(stages)} issue(s) • {total_done}/{total_tasks} complete")
+    meta.set_halign(Gtk.Align.START)
+    try:
+        meta.get_style_context().add_class("stage-progress")
+    except Exception:
+        pass
+    root.pack_start(meta, False, False, 0)
+
+    desc_lbl = Gtk.Label(label="GitHub issue body:")
+    desc_lbl.set_halign(Gtk.Align.START)
+    root.pack_start(desc_lbl, False, False, 0)
+
+    desc_scroll = Gtk.ScrolledWindow()
+    desc_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+    desc_scroll.set_min_content_height(300)
+
+    desc_view = Gtk.TextView()
+    desc_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+    desc_view.set_monospace(True)
+    desc_buf = desc_view.get_buffer()
+    desc_buf.set_text(self._dwbhs_build_branch_description(branch))
+
+    desc_scroll.add(desc_view)
+    root.pack_start(desc_scroll, True, True, 0)
+
+    status_lbl = Gtk.Label(label="Ready — copy title/body into GitHub.")
+    status_lbl.set_halign(Gtk.Align.START)
+    try:
+        status_lbl.get_style_context().add_class("stage-progress")
+    except Exception:
+        pass
+
+    btn_row = Gtk.Box(spacing=6)
+
+    copy_title_btn = Gtk.Button(label="📋 Title")
+    copy_title_btn.set_tooltip_text("Copy clean GitHub issue title")
+    copy_title_btn.connect(
+        "clicked",
+        lambda *_: self._dwbh_copy_text(
+            title_entry.get_text().strip(),
+            status_lbl,
+            "Issue title copied"
+        )
+    )
+    btn_row.pack_start(copy_title_btn, False, False, 0)
+
+    copy_branch_btn = Gtk.Button(label="📋 Branch")
+    copy_branch_btn.set_tooltip_text("Copy real Git branch name")
+    copy_branch_btn.connect(
+        "clicked",
+        lambda *_: self._dwbh_copy_text(
+            branch_entry.get_text().strip(),
+            status_lbl,
+            "Git branch copied"
+        )
+    )
+    btn_row.pack_start(copy_branch_btn, False, False, 0)
+
+    copy_body_btn = Gtk.Button(label="📋 Body")
+    copy_body_btn.set_tooltip_text("Copy clean GitHub issue body")
+    copy_body_btn.connect(
+        "clicked",
+        lambda *_: self._dwbh_copy_text(
+            _dwbh_buffer_text(desc_buf) if "_dwbh_buffer_text" in globals() else "",
+            status_lbl,
+            "Issue body copied"
+        )
+    )
+    btn_row.pack_start(copy_body_btn, False, False, 0)
+
+    copy_both_btn = Gtk.Button(label="📋 Title + Body")
+    copy_both_btn.set_tooltip_text("Copy title and body together")
+    copy_both_btn.connect(
+        "clicked",
+        lambda *_: self._dwbh_copy_text(
+            "GitHub issue title:\n"
+            + title_entry.get_text().strip()
+            + "\n\nGitHub issue body:\n"
+            + (_dwbh_buffer_text(desc_buf).strip() if "_dwbh_buffer_text" in globals() else "")
+            + "\n",
+            status_lbl,
+            "Issue title + body copied"
+        )
+    )
+    btn_row.pack_start(copy_both_btn, False, False, 0)
+
+    switch_btn = Gtk.Button(label="Create/Switch Git Branch")
+    switch_btn.set_tooltip_text("Safely create or switch to the real Git branch")
+    switch_btn.connect(
+        "clicked",
+        lambda *_: self._dwbh_create_or_switch_git_branch(branch_entry.get_text().strip(), status_lbl)
+    )
+    btn_row.pack_start(switch_btn, False, False, 0)
+
+    refresh_btn = Gtk.Button(label="↻ Refresh")
+    refresh_btn.set_tooltip_text("Refresh issue body from current checklist data")
+    refresh_btn.connect(
+        "clicked",
+        lambda *_: (
+            desc_buf.set_text(self._dwbhs_build_branch_description(branch_entry.get_text().strip())),
+            title_entry.set_text(_dwbhs_human_branch_title(branch_entry.get_text().strip())),
+            status_lbl.set_text("✅ Issue body refreshed")
+        )
+    )
+    btn_row.pack_start(refresh_btn, False, False, 0)
+
+    close_btn = Gtk.Button(label="Close")
+    close_btn.connect("clicked", lambda *_: win.destroy())
+    btn_row.pack_end(close_btn, False, False, 0)
+
+    root.pack_start(btn_row, False, False, 0)
+    root.pack_start(status_lbl, False, False, 0)
+
+    win.show_all()
+    win.present()
+
+
+if not getattr(ChecklistWindow, "_dw_clean_branch_issue_handoff_format_applied", False):
+    ChecklistWindow._dwbhs_build_branch_description = _dwbhs_build_branch_description
+    ChecklistWindow._dwbh_build_branch_description = _dwbhs_build_branch_description
+    ChecklistWindow._dwbh_open_window = _dwbhs_open_window
+    ChecklistWindow._dw_clean_branch_issue_handoff_format_applied = True
+
