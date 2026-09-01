@@ -1582,3 +1582,103 @@ def export_markdown(project_path, project_name="Project"):
 
     return "\n".join(lines).rstrip() + "\n"
 
+
+
+# ── DevWise branch labels parser/export patch ───────────────────────────────
+# Adds support for:
+# # Branch: feat/example
+# Labels: enhancement, frontend, priority-medium
+#
+# The existing parser still handles branches/issues/tasks.
+# This wrapper extracts branch-level labels and applies them to every stage
+# inside that branch.
+
+def _dw_labels_clean(value):
+    labels = []
+
+    for part in str(value or "").replace(";", ",").split(","):
+        label = part.strip().strip("`").strip()
+
+        if not label:
+            continue
+
+        if label not in labels:
+            labels.append(label)
+
+    return labels
+
+
+def _dw_labels_extract_branch_labels(markdown_text):
+    import re
+
+    labels_by_branch = {}
+    current_branch = ""
+
+    for raw in (markdown_text or "").splitlines():
+        line = raw.strip()
+
+        branch_match = re.match(r"^\s*#{1,6}\s*Branch\s*:\s*(.+)$", line, flags=re.I)
+        if branch_match:
+            current_branch = branch_match.group(1).strip()
+            labels_by_branch.setdefault(current_branch, [])
+            continue
+
+        labels_match = re.match(r"^\s*Labels?\s*:\s*(.+)$", line, flags=re.I)
+        if labels_match and current_branch:
+            labels_by_branch[current_branch] = _dw_labels_clean(labels_match.group(1))
+
+    return labels_by_branch
+
+
+if not globals().get("_dw_branch_labels_parser_patch_applied", False):
+    _dw_branch_labels_base_parse_markdown_roadmap = parse_markdown_roadmap
+    _dw_branch_labels_base_export_markdown = export_markdown
+
+    def parse_markdown_roadmap(markdown_text):
+        stages = _dw_branch_labels_base_parse_markdown_roadmap(markdown_text)
+        labels_by_branch = _dw_labels_extract_branch_labels(markdown_text)
+
+        for stage in stages:
+            branch = str(stage.get("branch", "") or "").strip()
+
+            if branch and branch in labels_by_branch:
+                stage["labels"] = labels_by_branch.get(branch, [])
+
+        return stages
+
+    def export_markdown(project_path, project_name="Project"):
+        text = _dw_branch_labels_base_export_markdown(project_path, project_name)
+
+        data = get_project_data(project_path)
+        branch_labels = {}
+
+        for stage in data.get("stages", []):
+            branch = str(stage.get("branch", "") or "").strip()
+            labels = stage.get("labels", [])
+
+            if branch and labels:
+                branch_labels[branch] = _dw_labels_clean(", ".join(labels))
+
+        if not branch_labels:
+            return text
+
+        lines = []
+        current_branch = ""
+
+        for line in text.splitlines():
+            lines.append(line)
+
+            import re
+            branch_match = re.match(r"^\s*#\s*Branch\s*:\s*(.+)$", line.strip(), flags=re.I)
+
+            if branch_match:
+                current_branch = branch_match.group(1).strip()
+                labels = branch_labels.get(current_branch, [])
+
+                if labels:
+                    lines.append("Labels: " + ", ".join(labels))
+
+        return "\n".join(lines).rstrip() + "\n"
+
+    _dw_branch_labels_parser_patch_applied = True
+

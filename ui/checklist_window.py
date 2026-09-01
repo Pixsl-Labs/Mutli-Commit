@@ -5847,3 +5847,284 @@ if not getattr(ChecklistWindow, "_dw_clean_branch_issue_handoff_format_applied",
     ChecklistWindow._dwbh_open_window = _dwbhs_open_window
     ChecklistWindow._dw_clean_branch_issue_handoff_format_applied = True
 
+
+
+# ── DevWise branch labels prompt/handoff patch ──────────────────────────────
+# Adds branch-level labels to checklist prompting and branch handoff output.
+# Intended GitHub labels examples:
+# enhancement, bug, documentation, refactor, testing, frontend, backend,
+# cli, web, security, priority-high, priority-medium, priority-low,
+# dissertation, placement, good-first-issue, blocked
+
+def _dwbl_prompt_subject(self):
+    project_name = os.path.basename(os.path.abspath(self.project_path)) or "this project"
+
+    if project_name.strip().lower() == "devwise":
+        return "DevWise checklist"
+
+    return f"{project_name} DevWise checklist"
+
+
+def _dwbl_markdown_import_prompt(self):
+    subject = self._dwbl_prompt_subject()
+
+    return f"""Create or update a {subject}.
+
+IMPORTANT OUTPUT RULE:
+Return only one clean markdown code block. No explanation outside it.
+Do not include citations, source labels, contentReference tags, oaicite tags, or tables.
+
+Use this exact structure:
+
+# Branch: feat/example-branch
+Labels: enhancement, frontend, priority-medium
+Notes: Optional branch/workstream context.
+
+## Issue: Short issue title
+Status: IN PROGRESS
+Progress: 0 / 2 tasks complete
+
+- First task name
+Done: no
+Descript: Useful detail for this task.
+
+- Second task name
+Done: no
+Descript: Useful detail for this task.
+
+Suggested label style:
+- Use 2 to 6 labels per branch.
+- Use labels that would also make sense on GitHub issues.
+- Prefer lowercase kebab-case labels.
+- Good examples: enhancement, bug, documentation, refactor, testing, frontend, backend, cli, web, security, priority-high, priority-medium, priority-low, dissertation, placement, good-first-issue, blocked.
+- Use priority-high only for genuinely urgent or blocking work.
+- Use blocked only when the work cannot continue without another task, decision, deadline, or dependency.
+- Use dissertation for academic/report/evaluation branches.
+- Use placement for employability, packaging, polish, engineering-quality or portfolio branches.
+
+Rules:
+- Use Branch for the Git branch/workstream.
+- Use Labels directly under each Branch.
+- Use Notes directly under each Branch for branch/workstream context.
+- Use Issue for grouped work inside a branch.
+- Use normal bullet points for tasks.
+- Use Done: yes or Done: no under each task.
+- Use Descript: directly under each task for task description.
+- If updating an existing checklist, focus on active/incomplete work.
+- Keep completed work only as completed context unless I explicitly ask for full completed tasks.
+- Do not use checkbox syntax like [ ] or [x].
+"""
+
+
+def _dwbl_clean_labels(value):
+    labels = []
+
+    if isinstance(value, list):
+        raw = ",".join(str(x) for x in value)
+    else:
+        raw = str(value or "")
+
+    for part in raw.replace(";", ",").split(","):
+        label = part.strip().strip("`").strip()
+
+        if label and label not in labels:
+            labels.append(label)
+
+    return labels
+
+
+def _dwbl_labels_for_branch(self, branch):
+    labels = []
+
+    for stage in self.project_data.get("stages", []):
+        stage_branch = str(stage.get("branch", "") or "").strip() or "No branch"
+
+        if stage_branch != branch:
+            continue
+
+        for label in _dwbl_clean_labels(stage.get("labels", [])):
+            if label not in labels:
+                labels.append(label)
+
+    if labels:
+        return labels
+
+    # Sensible fallbacks when older checklists do not have Labels yet.
+    lower = str(branch or "").lower()
+
+    if "web" in lower:
+        labels.extend(["enhancement", "web"])
+    if "api" in lower:
+        labels.extend(["enhancement", "backend"])
+    if "cli" in lower:
+        labels.extend(["enhancement", "cli"])
+    if "security" in lower or "sentinel" in lower:
+        labels.extend(["security"])
+    if "docs" in lower or "dissertation" in lower:
+        labels.extend(["documentation", "dissertation"])
+    if "placement" in lower or "engineering" in lower:
+        labels.extend(["enhancement", "placement"])
+    if "fix" in lower or lower.startswith("bug"):
+        labels.extend(["bug"])
+    if "test" in lower or "eval" in lower:
+        labels.extend(["testing"])
+
+    if not labels:
+        labels.extend(["enhancement", "priority-medium"])
+
+    clean = []
+
+    for label in labels:
+        if label not in clean:
+            clean.append(label)
+
+    return clean
+
+
+def _dwbl_stage_note(stage):
+    notes = str(stage.get("notes", "") or "").strip()
+    branch_notes = str(stage.get("branch_notes", "") or "").strip()
+
+    if notes:
+        return notes
+
+    return branch_notes
+
+
+def _dwbl_human_branch_title(branch):
+    import re
+
+    raw = str(branch or "").strip()
+
+    if not raw:
+        return "Branch Summary"
+
+    raw = raw.replace("refs/heads/", "").strip("/")
+
+    parts = [p for p in raw.split("/") if p]
+
+    if len(parts) > 1 and parts[0].lower() in {
+        "feat", "fix", "chore", "docs", "doc", "test", "tests",
+        "refactor", "style", "perf", "build", "ci", "release", "hotfix"
+    }:
+        raw = "/".join(parts[1:])
+
+    raw = re.sub(r"[-_/]+", " ", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+
+    if not raw:
+        return "Branch Summary"
+
+    small_words = {"and", "or", "the", "a", "an", "to", "for", "of", "in", "on", "with"}
+    acronyms = {"api", "cli", "ui", "ux", "gui", "ssh", "http", "https", "json", "csv", "sql", "ip"}
+
+    words = []
+
+    for index, word in enumerate(raw.split()):
+        lower = word.lower()
+
+        if lower in acronyms:
+            words.append(lower.upper())
+        elif index > 0 and lower in small_words:
+            words.append(lower)
+        else:
+            words.append(lower[:1].upper() + lower[1:])
+
+    return " ".join(words)
+
+
+def _dwbl_build_branch_description(self, branch):
+    stages = self._dwbh_branch_stages(branch) if hasattr(self, "_dwbh_branch_stages") else []
+    title = _dwbl_human_branch_title(branch)
+    labels = self._dwbl_labels_for_branch(branch)
+
+    lines = [
+        f"# {title}",
+        "",
+        "Labels: " + ", ".join(labels),
+        "",
+    ]
+
+    if not stages:
+        lines.extend([
+            "No checklist issues were found for this branch yet.",
+            "",
+            "## Testing checklist",
+            "",
+            "- [ ] Run the project from terminal",
+            "- [ ] Confirm the branch checklist tasks match the implementation",
+            "- [ ] Commit and push the related changes",
+        ])
+        return "\n".join(lines).rstrip() + "\n"
+
+    for stage in stages:
+        issue_title = (
+            str(stage.get("issue", "") or "").strip()
+            or str(stage.get("title", "") or "").strip()
+            or "Untitled issue"
+        )
+
+        lines.extend([
+            f"## Issue: {issue_title}",
+            "",
+        ])
+
+        note = _dwbl_stage_note(stage)
+
+        if note:
+            lines.extend([
+                note,
+                "",
+            ])
+
+        items = stage.get("items", []) or []
+
+        if not items:
+            lines.extend([
+                "- [ ] Add implementation task",
+                "",
+            ])
+            continue
+
+        for item in items:
+            task = str(item.get("text", "") or "").strip()
+
+            if not task:
+                continue
+
+            tick = "x" if item.get("done") else " "
+            lines.append(f"- [{tick}] {task}")
+
+            desc = str(item.get("description", "") or "").strip()
+            if desc:
+                for desc_line in desc.splitlines():
+                    desc_line = desc_line.strip()
+                    if desc_line:
+                        lines.append(f"  - {desc_line}")
+
+        lines.append("")
+
+    lines.extend([
+        "## Testing checklist",
+        "",
+        "- [ ] Run the project from terminal",
+        "- [ ] Confirm the branch checklist tasks match the implementation",
+        "- [ ] Commit and push the related changes",
+        "",
+    ])
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+if not getattr(ChecklistWindow, "_dw_branch_labels_prompt_handoff_patch_applied", False):
+    ChecklistWindow._dwbl_prompt_subject = _dwbl_prompt_subject
+    ChecklistWindow._markdown_import_prompt = _dwbl_markdown_import_prompt
+    ChecklistWindow._dwbl_labels_for_branch = _dwbl_labels_for_branch
+    ChecklistWindow._dwbl_build_branch_description = _dwbl_build_branch_description
+
+    # Make Branch Handoff use the new body with Labels.
+    ChecklistWindow._dwbhs_build_branch_description = _dwbl_build_branch_description
+    ChecklistWindow._dwbh_build_branch_description = _dwbl_build_branch_description
+
+    ChecklistWindow._dw_branch_labels_prompt_handoff_patch_applied = True
+
