@@ -5020,3 +5020,480 @@ if not getattr(ChecklistWindow, "_dw_standalone_issue_handoff_patch_applied", Fa
     ChecklistWindow._dw_create_issue_from_selected = _dw_create_issue_from_selected_standalone_handoff
     ChecklistWindow._dw_standalone_issue_handoff_patch_applied = True
 
+
+
+# ── DevWise branch handoff window patch ─────────────────────────────────────
+# Behaviour:
+# - Click a checklist branch/folder row, then press Branch.
+# - Branch opens a standalone handoff window instead of only create/switch.
+# - Window shows copyable branch name.
+# - Window shows copyable full checklist description for that branch.
+# - Checklist task completion is exported as GitHub-style [x] / [ ] ticks.
+# - Includes a safe Create/Switch Git Branch button inside the handoff window.
+
+def _dwbh_copy_text(self, text, status_lbl=None, message="Copied."):
+    try:
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(text or "", -1)
+    except Exception:
+        pass
+
+    if status_lbl is not None:
+        try:
+            status_lbl.set_text("✅ " + message)
+            return
+        except Exception:
+            pass
+
+    try:
+        self._show_info(message)
+    except Exception:
+        pass
+
+
+def _dwbh_buffer_text(buf):
+    try:
+        start, end = buf.get_bounds()
+        return buf.get_text(start, end, False)
+    except Exception:
+        return ""
+
+
+def _dwbh_stage_branch(self, stage):
+    return str(stage.get("branch", "") or "").strip() or "No branch"
+
+
+def _dwbh_selected_branch(self):
+    branch = str(getattr(self, "_dw_selected_branch_key", "") or "").strip()
+
+    if branch and branch != "No branch":
+        return branch
+
+    stage = None
+
+    try:
+        stage = self._current_stage()
+    except Exception:
+        stage = None
+
+    if stage and str(stage.get("branch", "") or "").strip():
+        return str(stage.get("branch", "") or "").strip()
+
+    try:
+        issue = self._dw_current_issue()
+        if issue and issue.get("branch"):
+            return str(issue.get("branch", "")).strip()
+    except Exception:
+        pass
+
+    try:
+        current = self._dw_current_branch()
+        if current:
+            return str(current).strip()
+    except Exception:
+        pass
+
+    return ""
+
+
+def _dwbh_progress_status(done, total):
+    if total <= 0:
+        return "EMPTY"
+    if done <= 0:
+        return "NOT STARTED"
+    if done >= total:
+        return "COMPLETE"
+    return "IN PROGRESS"
+
+
+def _dwbh_branch_stages(self, branch):
+    stages = []
+
+    for stage in self.project_data.get("stages", []):
+        if self._dwbh_stage_branch(stage) == branch:
+            stages.append(stage)
+
+    return stages
+
+
+def _dwbh_build_branch_description(self, branch):
+    stages = self._dwbh_branch_stages(branch)
+
+    total_done = 0
+    total_tasks = 0
+
+    for stage in stages:
+        done, total = checklists.progress_for_stage(stage)
+        total_done += done
+        total_tasks += total
+
+    overall_status = _dwbh_progress_status(total_done, total_tasks)
+
+    lines = [
+        f"# Branch: {branch}",
+        "",
+        f"Status: {overall_status}",
+        f"Progress: {total_done} / {total_tasks} tasks complete",
+        f"Issues: {len(stages)}",
+        "",
+        "## Checklist description",
+        "",
+    ]
+
+    if not stages:
+        lines.extend([
+            "No checklist issues were found for this branch yet.",
+            "",
+            "## Tasks",
+            "",
+            "- [ ] Add checklist issues/tasks for this branch",
+        ])
+        return "\n".join(lines).rstrip() + "\n"
+
+    for stage in stages:
+        title = (
+            str(stage.get("issue", "") or "").strip()
+            or str(stage.get("title", "") or "").strip()
+            or "Untitled issue"
+        )
+
+        done, total = checklists.progress_for_stage(stage)
+        status = _dwbh_progress_status(done, total)
+        notes = str(stage.get("notes", "") or "").strip()
+        branch_notes = str(stage.get("branch_notes", "") or "").strip()
+
+        lines.extend([
+            f"## Issue: {title}",
+            "",
+            f"Status: {status}",
+            f"Progress: {done} / {total} tasks complete",
+            "",
+        ])
+
+        if branch_notes:
+            lines.extend([
+                "Branch notes:",
+                branch_notes,
+                "",
+            ])
+
+        if notes:
+            lines.extend([
+                "Issue notes:",
+                notes,
+                "",
+            ])
+
+        items = stage.get("items", []) or []
+
+        if not items:
+            lines.extend([
+                "- [ ] Add implementation task",
+                "",
+            ])
+            continue
+
+        for item in items:
+            task = str(item.get("text", "") or "").strip()
+
+            if not task:
+                continue
+
+            tick = "x" if item.get("done") else " "
+            lines.append(f"- [{tick}] {task}")
+
+            desc = str(item.get("description", "") or "").strip()
+            if desc:
+                for desc_line in desc.splitlines():
+                    desc_line = desc_line.strip()
+                    if desc_line:
+                        lines.append(f"  - {desc_line}")
+
+        lines.append("")
+
+    lines.extend([
+        "## Testing checklist",
+        "",
+        "- [ ] Run the project from terminal",
+        "- [ ] Confirm the branch checklist tasks match the implementation",
+        "- [ ] Commit and push the related changes",
+        "",
+    ])
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _dwbh_create_or_switch_git_branch(self, branch, status_lbl=None):
+    if not branch or branch == "No branch":
+        if status_lbl is not None:
+            status_lbl.set_text("❌ No branch selected")
+        return
+
+    if not dw_git_ops:
+        if status_lbl is not None:
+            status_lbl.set_text("❌ Git helper unavailable")
+        else:
+            self._show_info("Git helper unavailable.")
+        return
+
+    try:
+        q = shlex.quote(branch) if shlex else branch
+        ok, existing = dw_git_ops.run_custom(self.project_path, f"git branch --list {q}")
+
+        if ok and existing.strip():
+            ok2, out = dw_git_ops.run_custom(self.project_path, f"git checkout {q}")
+        else:
+            ok2, out = dw_git_ops.run_custom(self.project_path, f"git checkout -b {q}")
+
+        try:
+            self._dw_update_branch_issue_bar()
+        except Exception:
+            pass
+
+        if status_lbl is not None:
+            if ok2:
+                status_lbl.set_text(f"✅ Now on branch: {branch}")
+            else:
+                status_lbl.set_text("❌ " + (out or "Could not create/switch branch"))
+        else:
+            self._show_info(f"Now on branch:\n{branch}" if ok2 else out, title="Branch")
+    except Exception as e:
+        if status_lbl is not None:
+            status_lbl.set_text(f"❌ Branch switch failed: {e}")
+        else:
+            self._show_info(str(e), title="Branch error")
+
+
+def _dwbh_open_window(self, branch):
+    if not branch:
+        self._show_info("Click a checklist branch/folder row first, then press Branch.")
+        return
+
+    win = Gtk.Window(title="Branch Handoff")
+    win.set_default_size(760, 560)
+    win.set_size_request(460, 340)
+    win.set_resizable(True)
+    win.set_keep_above(True)
+
+    try:
+        win.set_type_hint(Gdk.WindowTypeHint.UTILITY)
+    except Exception:
+        pass
+
+    if not hasattr(self, "_dw_branch_handoff_windows"):
+        self._dw_branch_handoff_windows = []
+
+    self._dw_branch_handoff_windows.append(win)
+
+    def _drop_ref(_win):
+        try:
+            self._dw_branch_handoff_windows.remove(_win)
+        except Exception:
+            pass
+
+    win.connect("destroy", _drop_ref)
+
+    root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+    root.set_border_width(12)
+    win.add(root)
+
+    header = Gtk.Box(spacing=8)
+
+    heading = Gtk.Label()
+    heading.set_markup("<b>Branch Handoff</b>")
+    heading.set_halign(Gtk.Align.START)
+    header.pack_start(heading, True, True, 0)
+
+    hide_btn = Gtk.Button(label="🙈 Hide Checklist")
+    hide_btn.set_tooltip_text("Hide the checklist while keeping this branch handoff window open")
+    hide_btn.connect("clicked", lambda *_: self.hide())
+    header.pack_end(hide_btn, False, False, 0)
+
+    show_btn = Gtk.Button(label="👁 Checklist")
+    show_btn.set_tooltip_text("Show the checklist again")
+    show_btn.connect("clicked", lambda *_: (self.show(), self.present()))
+    header.pack_end(show_btn, False, False, 0)
+
+    root.pack_start(header, False, False, 0)
+    root.pack_start(Gtk.Separator(), False, False, 0)
+
+    branch_lbl = Gtk.Label(label="Branch name:")
+    branch_lbl.set_halign(Gtk.Align.START)
+    root.pack_start(branch_lbl, False, False, 0)
+
+    branch_entry = Gtk.Entry()
+    branch_entry.set_text(branch)
+    branch_entry.set_editable(True)
+    branch_entry.set_tooltip_text("Copyable branch name")
+    root.pack_start(branch_entry, False, False, 0)
+
+    stages = self._dwbh_branch_stages(branch)
+    total_done = 0
+    total_tasks = 0
+
+    for stage in stages:
+        done, total = checklists.progress_for_stage(stage)
+        total_done += done
+        total_tasks += total
+
+    meta = Gtk.Label(label=f"{len(stages)} issue(s) • {total_done}/{total_tasks} complete • {_dwbh_progress_status(total_done, total_tasks)}")
+    meta.set_halign(Gtk.Align.START)
+    try:
+        meta.get_style_context().add_class("stage-progress")
+    except Exception:
+        pass
+    root.pack_start(meta, False, False, 0)
+
+    desc_lbl = Gtk.Label(label="Full checklist description:")
+    desc_lbl.set_halign(Gtk.Align.START)
+    root.pack_start(desc_lbl, False, False, 0)
+
+    desc_scroll = Gtk.ScrolledWindow()
+    desc_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+    desc_scroll.set_min_content_height(310)
+
+    desc_view = Gtk.TextView()
+    desc_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+    desc_view.set_monospace(True)
+    desc_buf = desc_view.get_buffer()
+    desc_buf.set_text(self._dwbh_build_branch_description(branch))
+
+    desc_scroll.add(desc_view)
+    root.pack_start(desc_scroll, True, True, 0)
+
+    status_lbl = Gtk.Label(label="Ready — copy branch name or checklist description.")
+    status_lbl.set_halign(Gtk.Align.START)
+    try:
+        status_lbl.get_style_context().add_class("stage-progress")
+    except Exception:
+        pass
+
+    btn_row = Gtk.Box(spacing=6)
+
+    copy_branch_btn = Gtk.Button(label="📋 Branch")
+    copy_branch_btn.set_tooltip_text("Copy branch name only")
+    copy_branch_btn.connect("clicked", lambda *_: self._dwbh_copy_text(branch_entry.get_text().strip(), status_lbl, "Branch name copied"))
+    btn_row.pack_start(copy_branch_btn, False, False, 0)
+
+    copy_desc_btn = Gtk.Button(label="📋 Description")
+    copy_desc_btn.set_tooltip_text("Copy full checklist description")
+    copy_desc_btn.connect("clicked", lambda *_: self._dwbh_copy_text(_dwbh_buffer_text(desc_buf), status_lbl, "Checklist description copied"))
+    btn_row.pack_start(copy_desc_btn, False, False, 0)
+
+    copy_both_btn = Gtk.Button(label="📋 Both")
+    copy_both_btn.set_tooltip_text("Copy branch name and full checklist description together")
+    copy_both_btn.connect(
+        "clicked",
+        lambda *_: self._dwbh_copy_text(
+            "Branch name:\n"
+            + branch_entry.get_text().strip()
+            + "\n\nChecklist description:\n"
+            + _dwbh_buffer_text(desc_buf).strip()
+            + "\n",
+            status_lbl,
+            "Branch name + description copied"
+        )
+    )
+    btn_row.pack_start(copy_both_btn, False, False, 0)
+
+    switch_btn = Gtk.Button(label="Create/Switch Git Branch")
+    switch_btn.set_tooltip_text("Safely create or switch to this Git branch")
+    switch_btn.connect("clicked", lambda *_: self._dwbh_create_or_switch_git_branch(branch_entry.get_text().strip(), status_lbl))
+    btn_row.pack_start(switch_btn, False, False, 0)
+
+    refresh_btn = Gtk.Button(label="↻ Refresh")
+    refresh_btn.set_tooltip_text("Refresh description from current checklist data")
+    refresh_btn.connect("clicked", lambda *_: (desc_buf.set_text(self._dwbh_build_branch_description(branch_entry.get_text().strip())), status_lbl.set_text("✅ Description refreshed")))
+    btn_row.pack_start(refresh_btn, False, False, 0)
+
+    close_btn = Gtk.Button(label="Close")
+    close_btn.connect("clicked", lambda *_: win.destroy())
+    btn_row.pack_end(close_btn, False, False, 0)
+
+    root.pack_start(btn_row, False, False, 0)
+    root.pack_start(status_lbl, False, False, 0)
+
+    win.show_all()
+    win.present()
+
+
+def _dw_create_or_switch_issue_branch_handoff(self, _=None):
+    branch = self._dwbh_selected_branch()
+
+    if not branch:
+        self._show_info("Click a checklist branch/folder row first, then press Branch.")
+        return
+
+    self._dwbh_open_window(branch)
+
+
+def _dwbh_on_stage_list_button_press(self, widget, event):
+    try:
+        row = self.stage_list.get_row_at_y(int(event.y))
+
+        if row is not None and getattr(row, "is_branch_header", False):
+            branch = getattr(row, "branch_key", "") or "No branch"
+            self._dw_selected_branch_key = branch
+    except Exception:
+        pass
+
+    return ChecklistWindow._dwbh_base_stage_button_press(self, widget, event)
+
+
+def _dwbh_on_stage_selected(self, listbox, row):
+    try:
+        if row is not None and getattr(row, "is_branch_header", False):
+            self._dw_selected_branch_key = getattr(row, "branch_key", "") or "No branch"
+            return
+
+        if row is not None and hasattr(row, "stage_index"):
+            stages = self.project_data.get("stages", [])
+            if 0 <= row.stage_index < len(stages):
+                branch = str(stages[row.stage_index].get("branch", "") or "").strip()
+                if branch:
+                    self._dw_selected_branch_key = branch
+    except Exception:
+        pass
+
+    return ChecklistWindow._dwbh_base_stage_selected(self, listbox, row)
+
+
+def _dwbh_make_branch_header_row(self, group):
+    row = ChecklistWindow._dwbh_base_make_branch_header_row(self, group)
+
+    try:
+        row.branch_key = group.get("branch", "No branch")
+        row.set_tooltip_text(
+            "Click to open/close this branch.\n"
+            "Then press Branch to open a copyable branch handoff window."
+        )
+    except Exception:
+        pass
+
+    return row
+
+
+if not getattr(ChecklistWindow, "_dw_branch_handoff_window_patch_applied", False):
+    ChecklistWindow._dwbh_stage_branch = _dwbh_stage_branch
+    ChecklistWindow._dwbh_selected_branch = _dwbh_selected_branch
+    ChecklistWindow._dwbh_branch_stages = _dwbh_branch_stages
+    ChecklistWindow._dwbh_build_branch_description = _dwbh_build_branch_description
+    ChecklistWindow._dwbh_copy_text = _dwbh_copy_text
+    ChecklistWindow._dwbh_open_window = _dwbh_open_window
+    ChecklistWindow._dwbh_create_or_switch_git_branch = _dwbh_create_or_switch_git_branch
+
+    ChecklistWindow._dwbh_base_stage_button_press = ChecklistWindow._on_stage_list_button_press
+    ChecklistWindow._dwbh_base_stage_selected = ChecklistWindow._on_stage_selected
+
+    ChecklistWindow._on_stage_list_button_press = _dwbh_on_stage_list_button_press
+    ChecklistWindow._on_stage_selected = _dwbh_on_stage_selected
+
+    if hasattr(ChecklistWindow, "_dw_make_branch_header_row"):
+        ChecklistWindow._dwbh_base_make_branch_header_row = ChecklistWindow._dw_make_branch_header_row
+        ChecklistWindow._dw_make_branch_header_row = _dwbh_make_branch_header_row
+    elif hasattr(ChecklistWindow, "_dw_make_branch_header_row_clean"):
+        ChecklistWindow._dwbh_base_make_branch_header_row = ChecklistWindow._dw_make_branch_header_row_clean
+        ChecklistWindow._dw_make_branch_header_row_clean = _dwbh_make_branch_header_row
+
+    ChecklistWindow._dw_create_or_switch_issue_branch = _dw_create_or_switch_issue_branch_handoff
+    ChecklistWindow._dw_branch_handoff_window_patch_applied = True
+
